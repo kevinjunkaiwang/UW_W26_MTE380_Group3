@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
+.Python
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Arduino / embedded build artifacts
+*.o
+*.a
+*.elf
+*.hex
+*.bin
+*.map
+*.d
+*.eep
+*.lss
+*.lst
+*.sym
+*.srec
+*.ihex
+*.dfu
+.pio/
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.lof
+*.log
+*.lot
+*.out
+*.synctex.gz
+*.toc
+
+# Editors / OS
+.vscode/
+*.code-workspace
+.DS_Store
+Thumbs.db
