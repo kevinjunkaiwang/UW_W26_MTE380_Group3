@@ -3,12 +3,25 @@
 \usepackage{tikz}
 \usetikzlibrary{arrows.meta, shapes.geometric, positioning}
 \usepackage{amsmath}
+\usepackage{booktabs}
 \begin{document}
 
 \title{Software Architecture Layout}
 \author{}
 \date{}
 \maketitle
+
+\section{Memo Summary}
+\noindent\textbf{Purpose of document:} define the software architecture and execution flow used to complete line tracking, rescue, drop-off, and homing.
+\vspace{\baselineskip}
+
+\noindent\textbf{Purpose of calculation in this architecture:} the fuzzy scheduling calculation determines mode-dependent speed limits and PID gains from sensor-derived inputs $X_1$ and $X_2$.
+\vspace{\baselineskip}
+
+\noindent\textbf{Result of calculation used by architecture:} each loop computes a mode label and parameter set $(v_{\max}, K_p, K_i, K_d)$ that directly drives motor command generation.
+\vspace{\baselineskip}
+
+\noindent\textbf{How this supports team design decision:} the state-machine structure separates mission phases, and the adaptive control calculation is reused in each line-following phase (\texttt{LINE\_READING}, \texttt{GOTO\_ZONE}, \texttt{HOMING}) to keep behavior consistent and robust.
 
 \section{Software Plan}
 Using camera + IR/color sensor combination.
@@ -21,6 +34,35 @@ Using camera + IR/color sensor combination.
 \item Else: calculate the intersection first, then compute the line length $L_k$.
 \item Use $L_k$ and the current speed to obtain the fuzzy mode and PID parameters.
 \end{itemize}
+
+\section{Design Specifications (Software)}
+\begin{center}
+\begin{tabular}{p{0.24\linewidth}p{0.28\linewidth}p{0.36\linewidth}}
+\toprule
+Item & Specification & Purpose \\
+\midrule
+Control architecture & Finite state machine & Mission sequencing and fault isolation \\
+Sensor fusion & IR array + camera ROI & Combine lateral error with lookahead visibility \\
+Fuzzy inputs & $X_1$ and $X_2$ in 0--100 & Normalized scheduler inputs \\
+Controller output & $(v_{\max}, K_p, K_i, K_d)$ & Adaptive speed cap and PID gains \\
+Motor command bounds & left/right in [-1,1] & Safe command saturation \\
+Line-following reuse & \texttt{LINE\_READING}, \texttt{GOTO\_ZONE}, \texttt{HOMING} & Consistent behavior across phases \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Calculation Link to Architecture}
+At every control loop where line following is active:
+\[
+X_1 = \frac{\max_j x_{j,k}}{|X|}\times 100,\qquad
+X_2 = \frac{L_k}{|L|}\times 100
+\]
+The fuzzy block returns the mode-dependent tuple $(v_{\max}, K_p, K_i, K_d)$, then motor commands are computed by:
+\[
+u = K_p e + K_i \int e\,dt + K_d \frac{de}{dt},\qquad
+u_L=\text{clamp}(v-u),\ u_R=\text{clamp}(v+u)
+\]
+This ties the design calculation to state-machine execution instead of treating the algorithm as an isolated module.
 
 \section{State Machine Flowchart}
 \begin{center}

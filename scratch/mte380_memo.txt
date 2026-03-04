@@ -1,0 +1,47 @@
+MTE 380
+Milestone 3: Memo – Design Calculations (individual). 4 - 5 pages maximum.
+Submitted as an individual effort, the memo will report to the teaching team a set of calculations
+to support your group’s design decisions. Each calculation submitted by a group’s members should
+be different; i.e., multiple people from the same group should not be submitting the same
+calculation.
+Your submission should include a memo detailing the purpose of the document, the purpose of the
+calculation, the result of the calculation, and how it supports your team’s design decision. The
+calculation and design specifications must be included.
+Use the calculation template introduced in the Detailed Design lecture for the example of propeller
+and motor sizing.
+Possible Calculations related to the overall Detailed Design that you may submit depending
+on your responsibilities towards your team’s effort (one or more of the categories below):
+a. Mechanical design
+i. Examples but not necessarily required: i) kinematics analysis, ii) dynamics
+analysis, iii) friction, iv) thrust, v) steering, vi) motor selection, vii) design
+of structural members.
+1. Brief explanation of theory
+2. Calculations
+3. Computer Simulation
+4. Testing
+b. Electrical design
+i. Examples but not necessarily required: i) power, ii) sensors, iii) filters, iv)
+H-bridge
+1. Brief explanation of theory
+2. Calculations
+3. Computer Simulation
+4. Testing
+c. Control system
+i. Examples but not necessarily required: i) navigation, ii) control algorithm,
+iii) state machine, iv) root locus, v) bode plot, vi) software
+1. Brief explanation of theory
+2. Calculations or Control algorithms
+3. Computer Simulation
+4. Testing
+Design calculations: The calculation should start with a design objective or constraint and lead to
+a design decision and possibly a component selection. With five groups members there should be
+five calculations spread across mechanical, electrical, and controls. You are being individually
+marked for your calculations.
+
+Instead of a calculation, a computer simulation can be performed. You must still demonstrate an
+understanding of the underlying engineering principal that you are applying. Software that is used
+for FEA, for example, can be considered as a calculation or simulation, but what is the underlying
+engineering principal? Testing is also another approach to design and can be substituted for a
+calculation.
+
+

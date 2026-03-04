@@ -1,0 +1,83 @@
+
+MTE 380 - Design Calculations Rubric
+Section
+(10 marks)
+0
+0.5
+1
+1.5
+2
+2.5
+Grade
+Section 1: 
+Objective or Purpose Statement
+(1 mark)
+Objective/
+Purpose statement is missing
+Objective statement does not clearly indicate the purpose of their calculation
+Statement clearly indicates the objective/
+purpose of their calculations.
+
+
+Section 2: References
+(1 mark)
+References are missing
+References are missing for some specifications
+References are provided for all specifications
+
+
+Section 3:
+Design Inputs
+(1 mark)
+Design inputs are missing
+Some design parameters that should be considered for the calculations is missing
+All design parameters required for the calculation is included 
+
+
+Section 4: Assumptions
+(1 mark)
+Assumptions are missing
+Some key assumptions are missing or assumptions that cannot be made are used
+All key assumptions are stated and are correct 
+
+
+Section 5:
+Analytical Method and Computations
+(2.5 marks)
+Analytical methods and computations are missing
+Key analysis points are missing
+Incorrect theory concepts / formulas are used
+Most justifications/ explanations on why the concept/ formula should be used is missing or incorrect
+Some justifications/ explanations on why the concept/ formula should be used is missing or incorrect
+All methods and theories needed to be applied for the calculations are clearly and correctly explained
+
+Section 6: Calculations
+(2.5 marks)
+Calculations are missing
+
+A lot of required calculations are missing 
+Some of the required calculations are missing
+Major calculation errors and/or missing units
+Minor calculations errors or missing units
+All required calculations are complete and correct
+
+Section 7: Results /Conclusions
+(1 mark)
+Results/ Conclusions are missing
+Statement does not conclude on the objective based on their calculations
+Statement clearly concludes on the objective based on their calculations
+
+
+
+Additional Deductions:
+-0.5 if the report exceeds the 5-page limit, excluding appendices
+
+
+
+-1 for each repeated calculations within the group
+
+
+Total Grade:
+
+
+

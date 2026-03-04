@@ -36,6 +36,8 @@ htmlcov/
 *.ihex
 *.dfu
 .pio/
+arduino/
+scatch/
 
 # LaTeX build artifacts
 *.aux

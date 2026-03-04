@@ -12,10 +12,26 @@
 \date{}
 \maketitle
 
+\section{Memo Summary}
+\noindent\textbf{Purpose of document:} record the fuzzy scheduling design calculation used by the line-following controller and document the assumptions, equations, and outputs used for implementation.
+\vspace{\baselineskip}
+
+\noindent\textbf{Purpose of calculation:} compute an adaptive control mode from measured operating conditions so the robot can run fast when visibility is good and remain stable when visibility is poor.
+\vspace{\baselineskip}
+
+\noindent\textbf{Result of calculation:} two normalized inputs, $X_1$ (speed) and $X_2$ (visible line length), are mapped through fuzzy rules to $X^*$ and a winning label that selects $(v_{\max}, K_p, K_i, K_d)$.
+\vspace{\baselineskip}
+
+\noindent\textbf{How this supports design decision:} the team uses adaptive scheduling (instead of fixed gains) as the primary software control strategy because the calculation directly links sensing quality to speed and controller aggressiveness.
+
 \section{Objective / Purpose Statement}
-Design objective: maximize line-following speed while keeping lateral error stable and avoiding loss of the line. 
-Constraint: motor speed is capped by hardware and the camera can only observe a limited lookahead length. 
-Design decision: use a fuzzy scheduler that maps the current speed command and the visible line length into a speed cap and PID gains.
+\noindent\textbf{Design objective:} maximize line-following speed while keeping lateral error stable and avoiding loss of the line.
+\vspace{\baselineskip}
+
+\noindent\textbf{Design constraint:} motor speed is capped by hardware and the camera can only observe a limited lookahead length.
+\vspace{\baselineskip}
+
+\noindent\textbf{Design decision:} use a fuzzy scheduler that maps the current speed command and the visible line length into a speed cap and PID gains.
 
 \section{References}
 \begin{itemize}
@@ -23,7 +39,7 @@ Design decision: use a fuzzy scheduler that maps the current speed command and t
 \item MTE 380 Detailed Design W2026 (design calculation template guidance).
 \end{itemize}
 
-\section{Design Inputs}
+\section{Design Inputs and Specifications}
 \begin{itemize}
 \item $x_{j,k}$: commanded speed of motor $j$ at iteration $k$.
 \item $|X|$: maximum motor speed capability (rpm).
@@ -32,6 +48,21 @@ Design decision: use a fuzzy scheduler that maps the current speed command and t
 \item $e$: lateral error from IR array (weighted centroid error).
 \item Membership function breakpoints for $X_1$, $X_2$, and output labels (heuristic, tunable).
 \end{itemize}
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Specification & Symbol / Parameter & Value / Range \\
+\midrule
+Normalized speed input & $X_1$ & 0 to 100 \\
+Visible line length input & $X_2$ & 0 to 100 \\
+Defuzzified scheduler output & $X^*$ & 1 to 100 (clamped) \\
+Camera ROI bottom fraction & \texttt{roi\_bottom\_ratio} & 0.60 (default) \\
+Row occupancy threshold & \texttt{row\_occupancy\_frac} & 0.02 (default) \\
+Wheel command bounds & $u_L, u_R$ & -1 to 1 \\
+\bottomrule
+\end{tabular}
+\end{center}
 
 \section{Assumptions}
 \begin{itemize}
@@ -59,6 +90,9 @@ In the absence of encoders, the commanded speed is used as a proxy for actual sp
 
 \section{Analytical Method and Computations}
 The fuzzy scheduler follows the DCOSS 2020 method. Two normalized inputs feed six rules; the aggregated output is defuzzified to a scalar $X^*$ (range 1--100). The winning output label maps to a speed cap and PID gains for the downstream controller.
+
+\subsection*{Underlying Engineering Principle}
+The underlying engineering principle is feedback control of a dynamic system with gain scheduling. The IR array provides lateral error for closed-loop PID correction, while camera-derived line visibility provides a lookahead proxy for available path information. Fuzzy inference approximates a nonlinear scheduling law that improves robustness compared with a single fixed-gain controller.
 
 \subsection*{Fuzzy Process Flowchart}
 \begin{center}
@@ -222,8 +256,5 @@ Given $X_1=20$ and $X_2=30$:
 
 \section{Results / Conclusions}
 The calculation converts measurable signals ($X_1$ speed and $X_2$ line length) into a discrete mode that determines a safe speed cap and PID gains. This satisfies the objective of maintaining stable tracking while permitting higher speeds when the visible line is long. The design decision is to use fuzzy scheduling instead of a fixed PID, with tunable membership functions and gain tables that can be refined on hardware.
-
-\section{Underlying Engineering Principle}
-The underlying engineering principle is \textbf{feedback control of a dynamic system}. The IR array provides the lateral error for closed-loop PID control, while the camera provides a lookahead measure of line length to adjust controller aggressiveness. The fuzzy system is a rule-based approximation of a nonlinear control law: it maps uncertain, noisy sensor inputs ($X_1$, $X_2$) into stable control parameters (speed cap and gains) using membership functions and defuzzification. This applies control theory concepts of stability, robustness, and sensor fusion rather than relying on a single fixed-gain controller.
 
 \end{document}
