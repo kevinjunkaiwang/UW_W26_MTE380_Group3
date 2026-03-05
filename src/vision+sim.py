@@ -12,7 +12,7 @@ def parse_args():
     p.add_argument("--width", type=int, default=0, help="Optional capture width.")
     p.add_argument("--height", type=int, default=0, help="Optional capture height.")
     p.add_argument("--roi", type=float, default=0.6, help="Bottom fraction of frame used for L2.")
-    p.add_argument("--thresh", type=int, default=0, help="Line threshold (0 = auto Otsu).")
+    p.add_argument("--thresh", type=int, default=0, help="Red-mask strictness (0 = default S/V floors).")
     p.add_argument("--row-frac", type=float, default=0.02, help="Row occupancy fraction threshold.")
     p.add_argument("--print-hz", type=float, default=10.0, help="How often to print L2 to terminal.")
     return p.parse_args()

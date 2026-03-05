@@ -2,7 +2,7 @@
 Pi-side runtime controller for the line-following robot.
 
 High-level responsibilities:
-1) Capture camera frames and compute vision features (lk_norm and L2 percentage).
+1) Capture camera frames and compute line-visibility metric X2 (L2 percentage).
 2) Compute X1 from previous-loop base_v command.
 3) Run fuzzy scheduler to pick (v_cap, Kp, Ki, Kd) from (X1, X2).
 4) Send only base speed and PID gains back to Arduino.
@@ -35,7 +35,6 @@ def default_port() -> str:
 class CameraSample:
     """Latest camera-derived features."""
     timestamp: float
-    lk: float
     valid: int
     l2_pct: float
 
@@ -116,7 +115,7 @@ class CameraWorker:
                 time.sleep(0.005)
                 continue
 
-            lk, valid, l2_pct = compute_features(
+            _, valid, l2_pct = compute_features(
                 frame,
                 roi_bottom_ratio=self.roi,
                 thresh_val=self.thresh,
@@ -126,7 +125,6 @@ class CameraWorker:
             with self._lock:
                 self._latest = CameraSample(
                     timestamp=now,
-                    lk=lk,
                     valid=int(valid),
                     l2_pct=l2_pct,
                 )
@@ -138,7 +136,6 @@ class CameraWorker:
                 return None
             return CameraSample(
                 timestamp=self._latest.timestamp,
-                lk=self._latest.lk,
                 valid=self._latest.valid,
                 l2_pct=self._latest.l2_pct,
             )
@@ -152,7 +149,7 @@ def parse_args():
     p.add_argument("--height", type=int, default=0, help="Optional camera height.")
     p.add_argument("--cam-fps", type=float, default=30.0, help="Camera capture target FPS.")
     p.add_argument("--roi", type=float, default=0.6, help="Bottom fraction of frame used for line sensing.")
-    p.add_argument("--thresh", type=int, default=0, help="Line threshold (0 = auto Otsu).")
+    p.add_argument("--thresh", type=int, default=0, help="Red-mask strictness (0 = default S/V floors).")
     p.add_argument("--row-frac", type=float, default=0.02, help="Row occupancy fraction threshold.")
 
     p.add_argument("--port", type=str, default=default_port(), help="Serial port to Arduino.")
@@ -164,7 +161,7 @@ def parse_args():
     p.add_argument("--camera-timeout", type=float, default=0.20, help="Max camera feature age before camera invalid.")
 
     p.add_argument("--v-cmd", type=float, default=0.65, help="Requested forward speed command [0..1].")
-    p.add_argument("--x1-alpha", type=float, default=0.8, help="EMA smoothing factor for X1 proxy (0..1).")
+    p.add_argument("--x1-alpha", type=float, default=0.8, help="EMA previous-weight for X1 proxy (0..1, higher=smoother).")
     return p.parse_args()
 
 
@@ -223,24 +220,20 @@ def main():
                 cam_fresh = (now - cam_data.timestamp) <= args.camera_timeout
                 cam_valid = cam_fresh and cam_data.valid == 1
                 l2_pct = cam_data.l2_pct
-                lk = cam_data.lk
             else:
                 cam_fresh = False
                 cam_valid = False
-                lk = 0.0
-            # Use look-ahead depth as X2 (paper-aligned distance proxy), not row-coverage percent.
-            x2 = 100.0 * lk if cam_valid else 0.0
+            # Use L2 row-coverage percentage as fuzzy X2.
+            x2 = l2_pct if cam_valid else 0.0
 
             # 3) X1 is derived from previous-loop base_v command (0..1 -> 0..100 scale).
             x1_raw = 100.0 * abs(prev_base_v)
             x1_f = float(args.x1_alpha) * x1_f + (1.0 - float(args.x1_alpha)) * x1_raw
 
-            # 4) Fuzzy scheduler selects speed cap and PID gains from (X1, X2).
-            _, _, pid_tuple = sched.evaluate(x1_f, x2)
-            v_cap, kp, ki, kd = pid_tuple
-
             if cam_valid:
                 # Normal mode: use fuzzy-selected speed cap and gains.
+                _, _, pid_tuple = sched.evaluate(x1_f, x2)
+                v_cap, kp, ki, kd = pid_tuple
                 base_v = min(args.v_cmd, v_cap)
             else:
                 # Conservative fallback when camera data is stale/invalid.

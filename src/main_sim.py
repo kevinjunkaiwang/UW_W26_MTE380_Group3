@@ -148,7 +148,7 @@ def parse_args():
     p.add_argument("--height", type=int, default=0, help="Optional camera height.")
     p.add_argument("--cam-fps", type=float, default=30.0, help="Camera capture target FPS.")
     p.add_argument("--roi", type=float, default=0.6, help="Bottom fraction of frame used for line sensing.")
-    p.add_argument("--thresh", type=int, default=0, help="Line threshold (0 = auto Otsu).")
+    p.add_argument("--thresh", type=int, default=0, help="Red-mask strictness (0 = default S/V floors).")
     p.add_argument(
         "--row-frac",
         type=float,
@@ -159,7 +159,7 @@ def parse_args():
     p.add_argument("--print-hz", type=float, default=10.0, help="How often to print PID values.")
     p.add_argument("--camera-timeout", type=float, default=0.20, help="Max camera feature age before invalid.")
     p.add_argument("--v-cmd", type=float, default=0.80, help="Requested forward speed command [0..1].")
-    p.add_argument("--x1-alpha", type=float, default=0.8, help="EMA smoothing factor for X1 proxy (0..1).")
+    p.add_argument("--x1-alpha", type=float, default=0.8, help="EMA previous-weight for X1 proxy (0..1, higher=smoother).")
     return p.parse_args()
 
 
@@ -216,17 +216,16 @@ def main():
                 cam_valid = False
                 lk_norm = 0.0
                 frame = None
-            # Use look-ahead depth as X2 (paper-aligned distance proxy), not row-coverage percent.
-            x2 = 100.0 * lk_norm if cam_valid else 0.0
+            # Use L2 row-coverage percentage as fuzzy X2.
+            x2 = l2_pct if cam_valid else 0.0
 
             # X1 is derived from previous-loop base_v command (0..1 -> 0..100 scale).
             x1_raw = 100.0 * abs(prev_base_v)
             x1_f = float(args.x1_alpha) * x1_f + (1.0 - float(args.x1_alpha)) * x1_raw
 
-            x_star, label, pid_tuple = sched.evaluate(x1_f, x2)
-            v_cap, kp, ki, kd = pid_tuple
-
             if cam_valid:
+                x_star, label, pid_tuple = sched.evaluate(x1_f, x2)
+                v_cap, kp, ki, kd = pid_tuple
                 base_v = min(args.v_cmd, v_cap)
                 label_disp = label
                 x_star_disp = x_star

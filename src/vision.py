@@ -20,9 +20,9 @@ def _cleanup_mask(mask: np.ndarray) -> np.ndarray:
     return mask
 
 
-def _line_mask_any_color(roi_bgr: np.ndarray, thresh_val: int) -> np.ndarray:
+def _line_mask_red(roi_bgr: np.ndarray, thresh_val: int) -> np.ndarray:
     """
-    Return a denoised binary mask for a green/teal line.
+    Return a denoised binary mask for a red line.
 
     Behavior:
     - If `thresh_val <= 0`, use default saturation/value floors.
@@ -38,15 +38,15 @@ def _line_mask_any_color(roi_bgr: np.ndarray, thresh_val: int) -> np.ndarray:
         min_sat = int(np.clip(thresh_val, 35, 255))
         min_val = int(np.clip(thresh_val + 5, 25, 255))
 
-    # Green plus teal/cyan bands to catch camera-dependent hue shifts.
-    lower_green = np.array([30, min_sat, min_val], dtype=np.uint8)
-    upper_green = np.array([95, 255, 255], dtype=np.uint8)
-    lower_teal = np.array([90, min_sat, min_val], dtype=np.uint8)
-    upper_teal = np.array([120, 255, 255], dtype=np.uint8)
+    # Red wraps around HSV hue endpoints, so use two hue bands.
+    lower_red_1 = np.array([0, min_sat, min_val], dtype=np.uint8)
+    upper_red_1 = np.array([12, 255, 255], dtype=np.uint8)
+    lower_red_2 = np.array([168, min_sat, min_val], dtype=np.uint8)
+    upper_red_2 = np.array([179, 255, 255], dtype=np.uint8)
 
-    mask_green = cv2.inRange(hsv, lower_green, upper_green)
-    mask_teal = cv2.inRange(hsv, lower_teal, upper_teal)
-    mask = cv2.bitwise_or(mask_green, mask_teal)
+    mask_red_1 = cv2.inRange(hsv, lower_red_1, upper_red_1)
+    mask_red_2 = cv2.inRange(hsv, lower_red_2, upper_red_2)
+    mask = cv2.bitwise_or(mask_red_1, mask_red_2)
     return _cleanup_mask(mask)
 
 
@@ -71,7 +71,7 @@ def compute_features(
     y0 = int(h * (1 - ratio))
     roi = frame[y0:h, :]
 
-    mask = _line_mask_any_color(roi, thresh_val=thresh_val)
+    mask = _line_mask_red(roi, thresh_val=thresh_val)
 
     row_sum = (mask > 0).sum(axis=1)
     # A row is considered part of line length if enough pixels are active.

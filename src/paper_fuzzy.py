@@ -73,14 +73,14 @@ class FuzzySet:
 
 # Input membership definitions (heuristic, as paper does not provide exact numbers)
 X1_SETS: List[FuzzySet] = [
-    FuzzySet("Low", 0, 0, 40),
-    FuzzySet("Medium", 20, 50, 80),
-    FuzzySet("High", 60, 100, 100),
+    FuzzySet("Low",    0,  0, 25),
+    FuzzySet("Medium", 15, 40, 65),
+    FuzzySet("High",   50,80,100),
 ]
 
 X2_SETS: List[FuzzySet] = [
-    FuzzySet("Close", 0, 0, 50),
-    FuzzySet("Far", 30, 100, 100),
+     FuzzySet("Close",  0,  20, 50),
+    FuzzySet("Far",   30,60,100),
 ]
 
 # Output membership definitions (LC, LF, MC, MF, HC, HF)
@@ -106,11 +106,11 @@ RULES: Dict[Tuple[str, str], str] = {
 # Example PID sets (speed cap, kp, ki, kd) per output label
 PID_SETS: Dict[str, Tuple[float, float, float, float]] = {
     "LC": (0.30, 0.80, 0.00, 0.10),
-    "LF": (0.35, 0.70, 0.00, 0.10),
-    "MC": (0.45, 0.65, 0.00, 0.12),
-    "MF": (0.55, 0.55, 0.00, 0.14),
-    "HC": (0.65, 0.45, 0.00, 0.16),
-    "HF": (0.75, 0.40, 0.00, 0.18),
+    "LF": (0.40, 0.70, 0.00, 0.10),
+    "MC": (0.50, 0.65, 0.00, 0.12),
+    "MF": (0.65, 0.55, 0.00, 0.14),  # key: let Far+Medium accelerate
+    "HC": (0.75, 0.45, 0.00, 0.16),
+    "HF": (0.85, 0.40, 0.00, 0.18),
 }
 
 
@@ -120,11 +120,11 @@ class FuzzyScheduler:
     def __init__(
         self,
         blend_gains: bool = True,
-        pid_smoothing: float = 0.8,
+        pid_smoothing: float = 0.4,
         sample_step: float = 0.25,
-        x1_alpha: float = 1.0,
-        x2_alpha: float = 0.85,
-        x_star_alpha: float = 0.7,
+        x1_alpha: float = 0.3,
+        x2_alpha: float = 0.4,
+        x_star_alpha: float = 0.5,
     ):
         self.x1_sets = X1_SETS
         self.x2_sets = X2_SETS
