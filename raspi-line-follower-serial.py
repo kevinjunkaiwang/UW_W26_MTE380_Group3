@@ -208,7 +208,14 @@ def main():
                     cv2.LINE_AA,
                 )
                 cv2.imshow("line-follow", image)
+
+                # If user closes the window (X button), stop robot and exit.
+                if cv2.getWindowProperty("line-follow", cv2.WND_PROP_VISIBLE) < 1:
+                    write_cmd(ser, "S")
+                    break
+
                 if (cv2.waitKey(1) & 0xFF) == ord("q"):
+                    write_cmd(ser, "S")
                     break
     finally:
         try:
