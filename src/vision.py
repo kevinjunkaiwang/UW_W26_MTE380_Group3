@@ -22,43 +22,32 @@ def _cleanup_mask(mask: np.ndarray) -> np.ndarray:
 
 def _line_mask_any_color(roi_bgr: np.ndarray, thresh_val: int) -> np.ndarray:
     """
-    Return a denoised binary mask for a line of any color by selecting the
-    better of dark-line and bright-line threshold candidates.
+    Return a denoised binary mask for a green/teal line.
 
     Behavior:
-    - thresh_val <= 0: use Otsu threshold for both polarities.
-    - thresh_val > 0: use manual threshold for both polarities.
-    - pick lower-density valid mask to avoid over-segmentation.
+    - If `thresh_val <= 0`, use default saturation/value floors.
+    - If `thresh_val > 0`, use it to tighten saturation/value requirements.
     """
-    gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+    hsv = cv2.GaussianBlur(hsv, (5, 5), 0)
 
     if thresh_val <= 0:
-        _, dark = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        _, bright = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        min_sat = 45
+        min_val = 35
     else:
-        t = int(np.clip(thresh_val, 1, 254))
-        _, dark = cv2.threshold(gray, t, 255, cv2.THRESH_BINARY_INV)
-        _, bright = cv2.threshold(gray, t, 255, cv2.THRESH_BINARY)
+        min_sat = int(np.clip(thresh_val, 35, 255))
+        min_val = int(np.clip(thresh_val + 5, 25, 255))
 
-    dark = _cleanup_mask(dark)
-    bright = _cleanup_mask(bright)
+    # Green plus teal/cyan bands to catch camera-dependent hue shifts.
+    lower_green = np.array([30, min_sat, min_val], dtype=np.uint8)
+    upper_green = np.array([95, 255, 255], dtype=np.uint8)
+    lower_teal = np.array([90, min_sat, min_val], dtype=np.uint8)
+    upper_teal = np.array([120, 255, 255], dtype=np.uint8)
 
-    # Prefer the candidate with less over-segmentation.
-    dark_ratio = float((dark > 0).mean())
-    bright_ratio = float((bright > 0).mean())
-
-    dark_ok = dark_ratio < 0.60
-    bright_ok = bright_ratio < 0.60
-    if dark_ok and bright_ok:
-        return dark if dark_ratio <= bright_ratio else bright
-    if dark_ok:
-        return dark
-    if bright_ok:
-        return bright
-
-    # Fallback: pick the less-dense candidate even if both are noisy.
-    return dark if dark_ratio <= bright_ratio else bright
+    mask_green = cv2.inRange(hsv, lower_green, upper_green)
+    mask_teal = cv2.inRange(hsv, lower_teal, upper_teal)
+    mask = cv2.bitwise_or(mask_green, mask_teal)
+    return _cleanup_mask(mask)
 
 
 def compute_features(
@@ -101,18 +90,3 @@ def compute_features(
     l2_pct = float(np.clip(l2_pct, 0.0, 100.0))
     return lk_norm, 1, l2_pct
 
-
-def compute_l2(
-    frame: np.ndarray,
-    roi_bottom_ratio: float = 0.6,
-    thresh_val: int = 0,
-    row_occupancy_frac: float = 0.02,
-) -> Tuple[float, int]:
-    """Convenience wrapper for callers that only need (L2_percent, valid)."""
-    _, valid, l2_pct = compute_features(
-        frame,
-        roi_bottom_ratio=roi_bottom_ratio,
-        thresh_val=thresh_val,
-        row_occupancy_frac=row_occupancy_frac,
-    )
-    return l2_pct, valid

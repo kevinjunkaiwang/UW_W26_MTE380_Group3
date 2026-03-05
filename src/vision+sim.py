@@ -53,6 +53,36 @@ def main():
                 thresh_val=args.thresh,
                 row_occupancy_frac=args.row_frac,
             )
+            display = frame.copy()
+            text = f"L2: {l2_pct:5.1f}%"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.9
+            thickness = 2
+            margin = 10
+            (text_w, text_h), _ = cv2.getTextSize(text, font, font_scale, thickness)
+            x = frame.shape[1] - text_w - margin
+            y = margin + text_h
+
+            h, w = display.shape[:2]
+            y0 = int(h * (1.0 - args.roi))
+            y0 = int(max(0, min(h - 1, y0)))
+            cv2.line(display, (0, y0), (w - 1, y0), (0, 255, 255), 2)
+
+            cv2.putText(
+                display,
+                text,
+                (x, y),
+                font,
+                font_scale,
+                (0, 255, 0),
+                thickness,
+                cv2.LINE_AA,
+            )
+
+            cv2.imshow("vision+sim", display)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+
             now = time.monotonic()
             if now >= next_print:
                 print(f"valid={int(valid)} l2_pct={l2_pct:5.1f}%")
@@ -61,6 +91,7 @@ def main():
         pass
     finally:
         cap.release()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
