@@ -20,6 +20,12 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Line-follow camera pipeline with I2C commands to Arduino."
     )
+    parser.add_argument(
+        "mode",
+        nargs="?",
+        choices=["test"],
+        help="Set to 'test' to bypass vision and type F/L/R/S commands manually.",
+    )
     parser.add_argument("--camera-index", type=int, default=1, help="VideoCapture index.")
     parser.add_argument("--width", type=int, default=1280, help="Requested capture width.")
     parser.add_argument("--height", type=int, default=720, help="Requested capture height.")
@@ -235,8 +241,52 @@ def update_ema(prev, measurement, alpha):
     return alpha * prev + (1.0 - alpha) * float(measurement)
 
 
+def run_test_mode(args):
+    bus = None
+    try:
+        bus = SMBus(args.i2c_bus)
+        time.sleep(0.1)
+        write_cmd(bus, args.i2c_address, "S")
+        print("Test mode: type F, L, R, or S to send a command. Type Q to quit.")
+
+        while True:
+            try:
+                raw = input("cmd> ")
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+
+            cmd = raw.strip().upper()
+            if not cmd:
+                continue
+            if cmd in ("Q", "QUIT", "EXIT"):
+                break
+            if cmd not in ("F", "L", "R", "S"):
+                print("Invalid command. Use F, L, R, S, or Q.")
+                continue
+
+            write_cmd(bus, args.i2c_address, cmd)
+            _, _, state_label = motor_speeds_from_command(cmd)
+            print("Sent {} ({})".format(cmd, state_label))
+    finally:
+        try:
+            if bus is not None:
+                write_cmd(bus, args.i2c_address, "S")
+        except Exception:
+            pass
+        if bus is not None:
+            bus.close()
+
+
 def main():
     args = parse_args()
+
+    if not (0x03 <= args.i2c_address <= 0x77):
+        raise ValueError("--i2c-address must be in the valid 7-bit range 0x03-0x77.")
+
+    if args.mode == "test":
+        run_test_mode(args)
+        return
 
     if not (0.0 < args.roi_bottom_ratio <= 1.0):
         raise ValueError("--roi-bottom-ratio must be in (0, 1].")
@@ -254,9 +304,6 @@ def main():
         raise ValueError("--left-frac and --right-frac must be in (0, 1).")
     if args.left_frac >= args.right_frac:
         raise ValueError("--left-frac must be less than --right-frac.")
-    if not (0x03 <= args.i2c_address <= 0x77):
-        raise ValueError("--i2c-address must be in the valid 7-bit range 0x03-0x77.")
-
     cap = open_camera(args.camera_index, args.width, args.height, args.cam_fps)
     if not cap.isOpened():
         raise RuntimeError(
