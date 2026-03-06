@@ -1,7 +1,7 @@
 """
 Raspberry Pi line-following vision node that sends driving commands to Arduino.
 
-Command protocol (newline-terminated ASCII):
+Command protocol (single-byte ASCII over I2C):
   F -> forward
   L -> turn left
   R -> turn right
@@ -13,43 +13,48 @@ import time
 
 import cv2
 import numpy as np
-import serial
+from smbus2 import SMBus
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Line-follow camera pipeline with serial commands to Arduino."
+        description="Line-follow camera pipeline with I2C commands to Arduino."
     )
     parser.add_argument("--camera-index", type=int, default=1, help="VideoCapture index.")
-    parser.add_argument("--width", type=int, default=640, help="Requested capture width.")
-    parser.add_argument("--height", type=int, default=480, help="Requested capture height.")
+    parser.add_argument("--width", type=int, default=1280, help="Requested capture width.")
+    parser.add_argument("--height", type=int, default=720, help="Requested capture height.")
     parser.add_argument("--cam-fps", type=float, default=30.0, help="Requested camera FPS.")
     parser.add_argument("--threshold", type=int, default=100, help="Binary threshold value.")
     parser.add_argument(
         "--roi-bottom-ratio",
         type=float,
-        default=0.45,
+        default=1.0,
         help="Bottom fraction of frame used for line detection.",
     )
     parser.add_argument(
         "--left-frac",
         type=float,
-        default=0.35,
+        default=(75.0 / 192.0),
         help="Left turn threshold as frame-width fraction.",
     )
     parser.add_argument(
         "--right-frac",
         type=float,
-        default=0.65,
+        default=(115.0 / 192.0),
         help="Right turn threshold as frame-width fraction.",
     )
     parser.add_argument(
-        "--serial-port",
-        type=str,
-        default="/dev/ttyACM0",
-        help="Arduino serial device path.",
+        "--i2c-bus",
+        type=int,
+        default=1,
+        help="Linux I2C bus number, e.g. SMBus(1) for /dev/i2c-1.",
     )
-    parser.add_argument("--baud", type=int, default=115200, help="Serial baud rate.")
+    parser.add_argument(
+        "--i2c-address",
+        type=lambda value: int(value, 0),
+        default=0x08,
+        help="Arduino I2C slave address. Accepts decimal or hex, e.g. 0x08.",
+    )
     parser.add_argument(
         "--command-rate-hz",
         type=float,
@@ -98,8 +103,20 @@ def classify_state(cx, left_bound, right_bound):
     return "F"
 
 
-def write_cmd(ser, cmd):
-    ser.write((cmd + "\n").encode("ascii"))
+def motor_speeds_from_command(cmd):
+    # Match Arduino logic: F/L/R/S map directly to left/right motor ON/OFF.
+    full = 255
+    if cmd == "F":
+        return full, full, "FORWARD"
+    if cmd == "L":
+        return 0, full, "TURN LEFT"
+    if cmd == "R":
+        return full, 0, "TURN RIGHT"
+    return 0, 0, "STOP"
+
+
+def write_cmd(bus, addr, cmd):
+    bus.write_byte(addr, ord(cmd))
 
 
 def main():
@@ -111,6 +128,8 @@ def main():
         raise ValueError("--left-frac and --right-frac must be in (0, 1).")
     if args.left_frac >= args.right_frac:
         raise ValueError("--left-frac must be less than --right-frac.")
+    if not (0x03 <= args.i2c_address <= 0x77):
+        raise ValueError("--i2c-address must be in the valid 7-bit range 0x03-0x77.")
 
     cap = open_camera(args.camera_index, args.width, args.height, args.cam_fps)
     if not cap.isOpened():
@@ -120,12 +139,19 @@ def main():
             )
         )
 
-    ser = serial.Serial(args.serial_port, args.baud, timeout=0.05)
-    time.sleep(1.5)
-    write_cmd(ser, "S")
+    bus = SMBus(args.i2c_bus)
+    time.sleep(0.1)
+    write_cmd(bus, args.i2c_address, "S")
 
     if args.show_window:
-        cv2.namedWindow("line-follow", cv2.WINDOW_NORMAL)
+        cv2.namedWindow("img", cv2.WINDOW_NORMAL)
+        actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if actual_width <= 0:
+            actual_width = args.width if args.width > 0 else 960
+        if actual_height <= 0:
+            actual_height = args.height if args.height > 0 else 540
+        cv2.resizeWindow("img", actual_width, actual_height)
 
     kernel = np.ones((3, 3), dtype=np.uint8)
     min_interval = 1.0 / max(1.0, args.command_rate_hz)
@@ -158,7 +184,6 @@ def main():
             right_bound = int(args.right_frac * frame_w)
 
             cmd = "S"
-            label = "NO LINE"
             if contours:
                 c = max(contours, key=cv2.contourArea)
                 moments = cv2.moments(c)
@@ -169,60 +194,67 @@ def main():
                     cmd = classify_state(cx, left_bound, right_bound)
                     line_missing_streak = 0
 
-                    if cmd == "F":
-                        label = "FORWARD"
-                    elif cmd == "L":
-                        label = "TURN LEFT"
-                    else:
-                        label = "TURN RIGHT"
-
                     if args.show_window:
-                        cv2.drawContours(roi, [c], -1, (0, 255, 0), 2)
-                        cv2.circle(roi, (cx, cy), 4, (0, 0, 255), -1)
+                        cv2.drawContours(roi, [c], -1, (0, 255, 0), 1)
+                        cv2.circle(roi, (cx, cy), 3, (0, 0, 255), -1)
             else:
                 line_missing_streak += 1
                 if line_missing_streak < 3 and last_cmd in ("L", "R"):
                     cmd = last_cmd
-                    label = "SEARCH {}".format("LEFT" if last_cmd == "L" else "RIGHT")
 
             now = time.monotonic()
             if cmd != last_cmd or (now - last_send_time) >= min_interval:
-                write_cmd(ser, cmd)
+                write_cmd(bus, args.i2c_address, cmd)
                 last_cmd = cmd
                 last_send_time = now
+
+            left_speed, right_speed, state_label = motor_speeds_from_command(cmd)
+            left_pct = int(round((left_speed / 255.0) * 100))
+            right_pct = int(round((right_speed / 255.0) * 100))
 
             if args.show_window:
                 cv2.line(image, (left_bound, 0), (left_bound, frame_h - 1), (255, 0, 0), 1)
                 cv2.line(
                     image, (right_bound, 0), (right_bound, frame_h - 1), (255, 0, 0), 1
                 )
-                cv2.line(image, (0, roi_y0), (frame_w - 1, roi_y0), (255, 255, 0), 1)
                 cv2.putText(
                     image,
-                    "CMD: {}".format(label),
+                    "CMD: {} ({})".format(cmd, state_label),
                     (8, 24),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
+                    0.6,
                     (0, 255, 255),
                     2,
                     cv2.LINE_AA,
                 )
-                cv2.imshow("line-follow", image)
+                cv2.putText(
+                    image,
+                    "L: {} ({}%)  R: {} ({}%)".format(
+                        left_speed, left_pct, right_speed, right_pct
+                    ),
+                    (8, 52),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.imshow("img", image)
 
                 # If user closes the window (X button), stop robot and exit.
-                if cv2.getWindowProperty("line-follow", cv2.WND_PROP_VISIBLE) < 1:
-                    write_cmd(ser, "S")
+                if cv2.getWindowProperty("img", cv2.WND_PROP_VISIBLE) < 1:
+                    write_cmd(bus, args.i2c_address, "S")
                     break
 
                 if (cv2.waitKey(1) & 0xFF) == ord("q"):
-                    write_cmd(ser, "S")
+                    write_cmd(bus, args.i2c_address, "S")
                     break
     finally:
         try:
-            write_cmd(ser, "S")
+            write_cmd(bus, args.i2c_address, "S")
         except Exception:
             pass
-        ser.close()
+        bus.close()
         cap.release()
         cv2.destroyAllWindows()
 
