@@ -1,11 +1,11 @@
 """
 Raspberry Pi line-following vision node that sends driving commands to Arduino.
 
-Command protocol (single-byte ASCII over I2C):
-  F -> forward
-  L -> turn left
-  R -> turn right
-  S -> stop
+Command protocol (ASCII text over raw I2C writes):
+  left <0..255>  -> left motor PWM
+  right <0..255> -> right motor PWM
+  D              -> green marker detected
+  B              -> blue marker detected
 """
 
 import argparse
@@ -13,18 +13,25 @@ import time
 
 import cv2
 import numpy as np
-from smbus2 import SMBus
+from smbus2 import SMBus, i2c_msg
+
+
+GREEN_LOWER_HSV = np.array([35, 70, 70], dtype=np.uint8)
+GREEN_UPPER_HSV = np.array([90, 255, 255], dtype=np.uint8)
+BLUE_LOWER_HSV = np.array([95, 70, 70], dtype=np.uint8)
+BLUE_UPPER_HSV = np.array([130, 255, 255], dtype=np.uint8)
+GREEN_MORPH_KERNEL = np.ones((3, 3), dtype=np.uint8)
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Line-follow camera pipeline with I2C commands to Arduino."
+        description="Line-follow camera pipeline with I2C motor-speed messages to Arduino."
     )
     parser.add_argument(
         "mode",
         nargs="?",
         choices=["test"],
-        help="Set to 'test' to bypass vision and type F/L/R/S commands manually.",
+        help="Set to 'test' to bypass vision and type raw messages manually.",
     )
     parser.add_argument("--camera-index", type=int, default=1, help="VideoCapture index.")
     parser.add_argument("--width", type=int, default=1280, help="Requested capture width.")
@@ -122,10 +129,28 @@ def parse_args():
         help="Arduino I2C slave address. Accepts decimal or hex, e.g. 0x08.",
     )
     parser.add_argument(
+        "--max-speed",
+        type=int,
+        default=255,
+        help="Maximum PWM value sent to each motor [0..255].",
+    )
+    parser.add_argument(
         "--command-rate-hz",
         type=float,
         default=20.0,
-        help="Minimum command send rate for keepalive.",
+        help="Minimum motor-speed send rate for keepalive.",
+    )
+    parser.add_argument(
+        "--green-min-area",
+        type=float,
+        default=500.0,
+        help="Minimum green contour area required to send D.",
+    )
+    parser.add_argument(
+        "--blue-min-area",
+        type=float,
+        default=500.0,
+        help="Minimum blue contour area required to send B.",
     )
     parser.add_argument(
         "--show-window",
@@ -161,28 +186,44 @@ def unpack_contours(result):
     return contours, hierarchy
 
 
-def command_from_centroid(cx, left_bound, right_bound):
-    if cx >= right_bound:
-        return "R"
+def clamp_speed(value):
+    return max(0, min(255, int(round(value))))
+
+
+def motor_speeds_from_centroid(cx, frame_w, left_bound, right_bound, max_speed):
+    full = clamp_speed(max_speed)
+    if cx is None:
+        return 0, 0, "STOP"
+
     if cx <= left_bound:
-        return "L"
-    return "F"
+        if left_bound <= 0:
+            return 0, full, "TURN LEFT"
+        left_ratio = np.clip(float(cx) / float(left_bound), 0.0, 1.0)
+        return clamp_speed(full * left_ratio), full, "TURN LEFT"
+
+    if cx >= right_bound:
+        right_edge = max(0.0, float(frame_w - 1))
+        right_span = max(1.0, right_edge - float(right_bound))
+        right_ratio = np.clip((right_edge - float(cx)) / right_span, 0.0, 1.0)
+        return full, clamp_speed(full * right_ratio), "TURN RIGHT"
+
+    return full, full, "FORWARD"
 
 
-def motor_speeds_from_command(cmd):
-    # Match Arduino logic: F/L/R/S map directly to left/right motor ON/OFF.
-    full = 255
-    if cmd == "F":
-        return full, full, "FORWARD"
-    if cmd == "L":
-        return 0, full, "TURN LEFT"
-    if cmd == "R":
-        return full, 0, "TURN RIGHT"
-    return 0, 0, "STOP"
+def write_message(bus, addr, message):
+    payload = message.encode("ascii")
+    if not payload:
+        raise ValueError("Cannot send an empty I2C message.")
+    bus.i2c_rdwr(i2c_msg.write(addr, payload))
 
 
-def write_cmd(bus, addr, cmd):
-    bus.write_byte(addr, ord(cmd))
+def send_motor_speeds(bus, addr, left_speed, right_speed):
+    write_message(bus, addr, "left {}".format(clamp_speed(left_speed)))
+    write_message(bus, addr, "right {}".format(clamp_speed(right_speed)))
+
+
+def send_stop(bus, addr):
+    send_motor_speeds(bus, addr, 0, 0)
 
 
 def threshold_mask(gray_blur, mode, fixed_thresh, adaptive_block_size, adaptive_c):
@@ -241,13 +282,36 @@ def update_ema(prev, measurement, alpha):
     return alpha * prev + (1.0 - alpha) * float(measurement)
 
 
+def detect_color(image, lower_hsv, upper_hsv, min_area):
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    color_mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
+    color_mask = cv2.erode(color_mask, GREEN_MORPH_KERNEL, iterations=1)
+    color_mask = cv2.dilate(color_mask, GREEN_MORPH_KERNEL, iterations=2)
+    contours, _ = unpack_contours(
+        cv2.findContours(color_mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    )
+    if not contours:
+        return False, 0.0
+
+    largest_area = max(float(cv2.contourArea(contour)) for contour in contours)
+    return largest_area >= min_area, largest_area
+
+
+def detect_green(image, min_area):
+    return detect_color(image, GREEN_LOWER_HSV, GREEN_UPPER_HSV, min_area)
+
+
+def detect_blue(image, min_area):
+    return detect_color(image, BLUE_LOWER_HSV, BLUE_UPPER_HSV, min_area)
+
+
 def run_test_mode(args):
     bus = None
     try:
         bus = SMBus(args.i2c_bus)
         time.sleep(0.1)
-        write_cmd(bus, args.i2c_address, "S")
-        print("Test mode: type F, L, R, or S to send a command. Type Q to quit.")
+        send_stop(bus, args.i2c_address)
+        print("Test mode: type messages like 'left 255', 'right 128', 'D', or 'B'. Type Q to quit.")
 
         while True:
             try:
@@ -256,22 +320,18 @@ def run_test_mode(args):
                 print()
                 break
 
-            cmd = raw.strip().upper()
-            if not cmd:
+            message = raw.strip()
+            if not message:
                 continue
-            if cmd in ("Q", "QUIT", "EXIT"):
+            if message.upper() in ("Q", "QUIT", "EXIT"):
                 break
-            if cmd not in ("F", "L", "R", "S"):
-                print("Invalid command. Use F, L, R, S, or Q.")
-                continue
 
-            write_cmd(bus, args.i2c_address, cmd)
-            _, _, state_label = motor_speeds_from_command(cmd)
-            print("Sent {} ({})".format(cmd, state_label))
+            write_message(bus, args.i2c_address, message)
+            print("Sent {}".format(message))
     finally:
         try:
             if bus is not None:
-                write_cmd(bus, args.i2c_address, "S")
+                send_stop(bus, args.i2c_address)
         except Exception:
             pass
         if bus is not None:
@@ -283,6 +343,8 @@ def main():
 
     if not (0x03 <= args.i2c_address <= 0x77):
         raise ValueError("--i2c-address must be in the valid 7-bit range 0x03-0x77.")
+    if not (0 <= args.max_speed <= 255):
+        raise ValueError("--max-speed must be in [0, 255].")
 
     if args.mode == "test":
         run_test_mode(args)
@@ -325,16 +387,19 @@ def main():
 
     kernel = np.ones((3, 3), dtype=np.uint8)
     min_interval = 1.0 / max(1.0, args.command_rate_hz)
-    last_sent_cmd = None
+    last_sent_left = None
+    last_sent_right = None
     last_send_time = 0.0
     near_cx_ema = None
     look_cx_ema = None
     miss_streak = 0
+    green_detected_prev = False
+    blue_detected_prev = False
 
     try:
         bus = SMBus(args.i2c_bus)
         time.sleep(0.1)
-        write_cmd(bus, args.i2c_address, "S")
+        send_stop(bus, args.i2c_address)
 
         while True:
             ok, image = cap.read()
@@ -381,7 +446,6 @@ def main():
 
             near_cx_ema = update_ema(near_cx_ema, near_cx, args.ema_alpha)
             look_cx_ema = update_ema(look_cx_ema, look_cx, args.ema_alpha)
-            cmd = "S"
             fused_cx = None
             near_for_fuse = near_cx_ema if near_cx is not None else None
             look_for_fuse = look_cx_ema if look_cx is not None else None
@@ -405,23 +469,52 @@ def main():
             elif look_for_fuse is not None:
                 fused_cx = int(round(look_for_fuse))
 
-            if fused_cx is not None:
-                cmd = command_from_centroid(fused_cx, left_bound, right_bound)
+            left_speed, right_speed, state_label = motor_speeds_from_centroid(
+                fused_cx, frame_w, left_bound, right_bound, args.max_speed
+            )
+            green_detected, green_area = detect_green(image, args.green_min_area)
+            blue_detected, blue_area = detect_blue(image, args.blue_min_area)
 
             now = time.monotonic()
-            if cmd != last_sent_cmd or (now - last_send_time) >= min_interval:
+            if (
+                left_speed != last_sent_left
+                or right_speed != last_sent_right
+                or (now - last_send_time) >= min_interval
+            ):
                 try:
-                    write_cmd(bus, args.i2c_address, cmd)
+                    send_motor_speeds(bus, args.i2c_address, left_speed, right_speed)
                 except OSError as exc:
                     raise RuntimeError(
                         "I2C write failed on bus {} to address {}.".format(
                             args.i2c_bus, hex(args.i2c_address)
                         )
                     ) from exc
-                last_sent_cmd = cmd
+                last_sent_left = left_speed
+                last_sent_right = right_speed
                 last_send_time = now
 
-            left_speed, right_speed, state_label = motor_speeds_from_command(cmd)
+            if green_detected and not green_detected_prev:
+                try:
+                    write_message(bus, args.i2c_address, "D")
+                except OSError as exc:
+                    raise RuntimeError(
+                        "I2C write failed on bus {} to address {}.".format(
+                            args.i2c_bus, hex(args.i2c_address)
+                        )
+                    ) from exc
+            green_detected_prev = green_detected
+
+            if blue_detected and not blue_detected_prev:
+                try:
+                    write_message(bus, args.i2c_address, "B")
+                except OSError as exc:
+                    raise RuntimeError(
+                        "I2C write failed on bus {} to address {}.".format(
+                            args.i2c_bus, hex(args.i2c_address)
+                        )
+                    ) from exc
+            blue_detected_prev = blue_detected
+
             left_pct = int(round((left_speed / 255.0) * 100))
             right_pct = int(round((right_speed / 255.0) * 100))
 
@@ -452,7 +545,7 @@ def main():
                     )
                 cv2.putText(
                     image,
-                    "CMD: {} ({})".format(cmd, state_label),
+                    "STATE: {}".format(state_label),
                     (8, 24),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
@@ -474,12 +567,13 @@ def main():
                 )
                 cv2.putText(
                     image,
-                    "near_x={} area={:.0f}  look_x={} area={:.0f}  mode={}".format(
+                    "near_x={} area={:.0f}  look_x={} area={:.0f}  green={:.0f}  blue={:.0f}".format(
                         "-" if near_cx is None else near_cx,
                         near_area,
                         "-" if look_cx is None else look_cx,
                         look_area,
-                        args.threshold_mode,
+                        green_area,
+                        blue_area,
                     ),
                     (8, 80),
                     cv2.FONT_HERSHEY_SIMPLEX,
@@ -488,20 +582,34 @@ def main():
                     1,
                     cv2.LINE_AA,
                 )
+                cv2.putText(
+                    image,
+                    "mode={}  D={}  B={}".format(
+                        args.threshold_mode,
+                        "YES" if green_detected else "NO",
+                        "YES" if blue_detected else "NO",
+                    ),
+                    (8, 104),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.55,
+                    (0, 220, 120) if (green_detected or blue_detected) else (220, 220, 220),
+                    1,
+                    cv2.LINE_AA,
+                )
                 cv2.imshow("img", image)
 
                 # If user closes the window (X button), stop robot and exit.
                 if cv2.getWindowProperty("img", cv2.WND_PROP_VISIBLE) < 1:
-                    write_cmd(bus, args.i2c_address, "S")
+                    send_stop(bus, args.i2c_address)
                     break
 
                 if (cv2.waitKey(1) & 0xFF) == ord("q"):
-                    write_cmd(bus, args.i2c_address, "S")
+                    send_stop(bus, args.i2c_address)
                     break
     finally:
         try:
             if bus is not None:
-                write_cmd(bus, args.i2c_address, "S")
+                send_stop(bus, args.i2c_address)
         except Exception:
             pass
         if bus is not None:
