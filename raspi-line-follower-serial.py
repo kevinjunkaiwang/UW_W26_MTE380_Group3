@@ -2,13 +2,13 @@
 Raspberry Pi line-following vision node that sends driving commands to Arduino.
 
 Command protocol (ASCII messages over I2C):
-  forward <0..255>
-  left <0..255>
-  right <0..255>
-  stop 0
-  press 0
-  D
-  B
+  F <0..255> -> forward
+  L <0..255> -> turn left
+  P 0 -> press
+  R <0..255> -> turn right
+  S 0 -> stop
+  D -> green detected
+  U -> blue detected
 """
 
 import argparse
@@ -72,19 +72,19 @@ def parse_args():
     parser.add_argument(
         "--green-h-low",
         type=int,
-        default=35,
+        default=75,
         help="Lower hue bound for green HSV range [0..179].",
     )
     parser.add_argument(
         "--green-h-high",
         type=int,
-        default=90,
+        default=100,
         help="Upper hue bound for green HSV range [0..179].",
     )
     parser.add_argument(
         "--green-s-min",
         type=int,
-        default=80,
+        default=40,
         help="Minimum saturation required for green pixels [0..255].",
     )
     parser.add_argument(
@@ -96,19 +96,19 @@ def parse_args():
     parser.add_argument(
         "--blue-h-low",
         type=int,
-        default=90,
+        default=105,
         help="Lower hue bound for blue HSV range [0..179].",
     )
     parser.add_argument(
         "--blue-h-high",
         type=int,
-        default=130,
+        default=140,
         help="Upper hue bound for blue HSV range [0..179].",
     )
     parser.add_argument(
         "--blue-s-min",
         type=int,
-        default=80,
+        default=60,
         help="Minimum saturation required for blue pixels [0..255].",
     )
     parser.add_argument(
@@ -126,13 +126,13 @@ def parse_args():
     parser.add_argument(
         "--green-min-area",
         type=float,
-        default=85000.0,
+        default=20000.0,
         help="Minimum contour area required to trigger the green D event.",
     )
     parser.add_argument(
         "--blue-min-area",
         type=float,
-        default=50000.0,
+        default=20000.0,
         help="Minimum contour area required to trigger the blue B event.",
     )
     parser.add_argument(
@@ -205,13 +205,13 @@ def parse_args():
         "--max-speed",
         type=int,
         default=255,
-        help="Maximum drive speed sent with forward/left/right commands [0..255].",
+        help="Maximum drive speed attached to F/L/R commands [0..255].",
     )
     parser.add_argument(
         "--min-turn-speed",
         type=int,
         default=110,
-        help="Minimum turn speed sent while steering left/right [0..255].",
+        help="Minimum turn speed attached to L/R commands [0..255].",
     )
     parser.add_argument(
         "--show-window",
@@ -251,49 +251,46 @@ def clamp_speed(value):
     return max(0, min(255, int(round(value))))
 
 
-def drive_message_from_centroid(cx, frame_w, left_bound, right_bound, args):
+def command_from_centroid(cx, frame_w, left_bound, right_bound, args):
     if cx is None:
-        return "stop 0"
-
-    full_speed = clamp_speed(args.max_speed)
+        return "S 0"
     if cx <= left_bound:
         turn_span = max(1, left_bound)
         turn_ratio = min(1.0, (left_bound - cx) / float(turn_span))
-        speed = args.min_turn_speed + turn_ratio * (full_speed - args.min_turn_speed)
-        return "left {}".format(clamp_speed(speed))
-
+        speed = args.min_turn_speed + turn_ratio * (args.max_speed - args.min_turn_speed)
+        return "L {}".format(clamp_speed(speed))
     if cx >= right_bound:
         turn_span = max(1, frame_w - right_bound)
         turn_ratio = min(1.0, (cx - right_bound) / float(turn_span))
-        speed = args.min_turn_speed + turn_ratio * (full_speed - args.min_turn_speed)
-        return "right {}".format(clamp_speed(speed))
+        speed = args.min_turn_speed + turn_ratio * (args.max_speed - args.min_turn_speed)
+        return "R {}".format(clamp_speed(speed))
+    return "F {}".format(clamp_speed(args.max_speed))
 
-    return "forward {}".format(full_speed)
 
-
-def motor_state_from_message(message):
-    if message == "D":
+def motor_state_from_command(cmd):
+    if cmd == "D":
         return 0, 0, "GREEN DETECTED"
-    if message == "B":
+    if cmd == "U":
         return 0, 0, "BLUE DETECTED"
 
-    parts = message.split()
+    parts = cmd.split()
     if not parts:
         return 0, 0, "STOP"
 
-    action = parts[0].lower()
+    action = parts[0].upper()
     try:
         speed = clamp_speed(int(parts[1])) if len(parts) > 1 else 0
     except ValueError:
         speed = 0
-    if action == "forward":
+
+    if action == "F":
         return speed, speed, "FORWARD"
-    if action == "left":
+    if action == "L":
         return 0, speed, "TURN LEFT"
-    if action == "right":
-        return speed, 0, "TURN RIGHT"
-    if action == "press":
+    if action == "P":
         return 0, 0, "PRESS"
+    if action == "R":
+        return speed, 0, "TURN RIGHT"
     return 0, 0, "STOP"
 
 
@@ -361,7 +358,7 @@ def event_message_from_areas(green_area, blue_area, green_min_area, blue_min_are
     if green_area >= green_min_area and green_area >= blue_area:
         return "D"
     if blue_area >= blue_min_area:
-        return "B"
+        return "U"
     return None
 
 
@@ -372,29 +369,40 @@ def normalize_test_message(raw, args):
 
     upper = text.upper()
     if upper == "F":
-        return "forward {}".format(clamp_speed(args.max_speed))
+        return "F {}".format(clamp_speed(args.max_speed))
     if upper == "L":
-        return "left {}".format(clamp_speed(args.max_speed))
+        return "L {}".format(clamp_speed(args.max_speed))
     if upper == "R":
-        return "right {}".format(clamp_speed(args.max_speed))
+        return "R {}".format(clamp_speed(args.max_speed))
     if upper == "S":
-        return "stop 0"
+        return "S 0"
     if upper == "P":
-        return "press 0"
-    if upper in ("D", "B"):
+        return "P 0"
+    if upper in ("D", "U"):
         return upper
 
-    parts = text.lower().split()
-    if len(parts) == 1 and parts[0] in ("stop", "press"):
-        return "{} 0".format(parts[0])
-    if len(parts) == 2 and parts[0] in ("forward", "left", "right", "stop", "press"):
+    parts = text.split()
+    if len(parts) == 2 and parts[0].upper() in ("F", "L", "R", "S", "P"):
         try:
             speed = clamp_speed(int(parts[1]))
         except ValueError:
             return ""
-        if parts[0] in ("stop", "press"):
+        if parts[0].upper() in ("S", "P"):
             speed = 0
-        return "{} {}".format(parts[0], speed)
+        return "{} {}".format(parts[0].upper(), speed)
+
+    lowered = text.lower()
+    aliases = {
+        "forward": "F {}".format(clamp_speed(args.max_speed)),
+        "left": "L {}".format(clamp_speed(args.max_speed)),
+        "right": "R {}".format(clamp_speed(args.max_speed)),
+        "stop": "S 0",
+        "press": "P 0",
+        "green": "D",
+        "blue": "U",
+    }
+    if lowered in aliases:
+        return aliases[lowered]
     return ""
 
 
@@ -436,9 +444,9 @@ def run_test_mode(args):
     try:
         bus = SMBus(args.i2c_bus)
         time.sleep(0.1)
-        write_cmd(bus, args.i2c_address, "stop 0")
+        write_cmd(bus, args.i2c_address, "S 0")
         print(
-            "Test mode: type forward/left/right <0-255>, stop, press, D, B, or Q to quit."
+            "Test mode: type F/L/R <0-255>, S, P, D, U, or forward/left/right/stop/press/green/blue. Q quits."
         )
 
         while True:
@@ -455,16 +463,18 @@ def run_test_mode(args):
 
             cmd = normalize_test_message(raw, args)
             if not cmd:
-                print("Invalid command. Use forward/left/right <0-255>, stop, press, D, B, or Q.")
+                print(
+                    "Invalid command. Use F/L/R <0-255>, S, P, D, U or forward/left/right/stop/press/green/blue."
+                )
                 continue
 
             write_cmd(bus, args.i2c_address, cmd)
-            _, _, state_label = motor_state_from_message(cmd)
+            _, _, state_label = motor_state_from_command(cmd)
             print("Sent {} ({})".format(cmd, state_label))
     finally:
         try:
             if bus is not None:
-                write_cmd(bus, args.i2c_address, "stop 0")
+                write_cmd(bus, args.i2c_address, "S 0")
         except Exception:
             pass
         if bus is not None:
@@ -567,7 +577,7 @@ def main():
     try:
         bus = SMBus(args.i2c_bus)
         time.sleep(0.1)
-        write_cmd(bus, args.i2c_address, "stop 0")
+        write_cmd(bus, args.i2c_address, "S 0")
 
         while True:
             ok, image = cap.read()
@@ -615,7 +625,7 @@ def main():
 
             near_cx_ema = update_ema(near_cx_ema, near_cx, args.ema_alpha)
             look_cx_ema = update_ema(look_cx_ema, look_cx, args.ema_alpha)
-            cmd = "stop 0"
+            cmd = "S 0"
             fused_cx = None
             near_for_fuse = near_cx_ema if near_cx is not None else None
             look_for_fuse = look_cx_ema if look_cx is not None else None
@@ -645,9 +655,7 @@ def main():
             if event_cmd is not None:
                 cmd = event_cmd
             else:
-                cmd = drive_message_from_centroid(
-                    fused_cx, frame_w, left_bound, right_bound, args
-                )
+                cmd = command_from_centroid(fused_cx, frame_w, left_bound, right_bound, args)
 
             now = time.monotonic()
             if cmd != last_sent_cmd or (now - last_send_time) >= min_interval:
@@ -662,7 +670,7 @@ def main():
                 last_sent_cmd = cmd
                 last_send_time = now
 
-            left_speed, right_speed, state_label = motor_state_from_message(cmd)
+            left_speed, right_speed, state_label = motor_state_from_command(cmd)
             left_pct = int(round((left_speed / 255.0) * 100))
             right_pct = int(round((right_speed / 255.0) * 100))
 
@@ -747,16 +755,16 @@ def main():
 
                 # If user closes the window (X button), stop robot and exit.
                 if cv2.getWindowProperty("img", cv2.WND_PROP_VISIBLE) < 1:
-                    write_cmd(bus, args.i2c_address, "stop 0")
+                    write_cmd(bus, args.i2c_address, "S 0")
                     break
 
                 if (cv2.waitKey(1) & 0xFF) == ord("q"):
-                    write_cmd(bus, args.i2c_address, "stop 0")
+                    write_cmd(bus, args.i2c_address, "S 0")
                     break
     finally:
         try:
             if bus is not None:
-                write_cmd(bus, args.i2c_address, "stop 0")
+                write_cmd(bus, args.i2c_address, "S 0")
         except Exception:
             pass
         if bus is not None:
