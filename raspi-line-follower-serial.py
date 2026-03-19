@@ -1,11 +1,14 @@
 """
 Raspberry Pi line-following vision node that sends driving commands to Arduino.
 
-Command protocol (ASCII text over raw I2C writes):
-  left <0..255>  -> left motor PWM
-  right <0..255> -> right motor PWM
-  D              -> green marker detected
-  B              -> blue marker detected
+Command protocol (ASCII messages over I2C):
+  forward <0..255>
+  left <0..255>
+  right <0..255>
+  stop 0
+  press 0
+  D
+  B
 """
 
 import argparse
@@ -16,57 +19,121 @@ import numpy as np
 from smbus2 import SMBus, i2c_msg
 
 
-GREEN_LOWER_HSV = np.array([35, 70, 70], dtype=np.uint8)
-GREEN_UPPER_HSV = np.array([90, 255, 255], dtype=np.uint8)
-BLUE_LOWER_HSV = np.array([95, 70, 70], dtype=np.uint8)
-BLUE_UPPER_HSV = np.array([130, 255, 255], dtype=np.uint8)
-GREEN_MORPH_KERNEL = np.ones((3, 3), dtype=np.uint8)
-
-
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Line-follow camera pipeline with I2C motor-speed messages to Arduino."
+        description="Line-follow camera pipeline with I2C commands to Arduino."
     )
     parser.add_argument(
         "mode",
         nargs="?",
         choices=["test"],
-        help="Set to 'test' to bypass vision and type raw messages manually.",
+        help="Set to 'test' to bypass vision and type commands manually.",
     )
     parser.add_argument("--camera-index", type=int, default=1, help="VideoCapture index.")
     parser.add_argument("--width", type=int, default=1280, help="Requested capture width.")
     parser.add_argument("--height", type=int, default=720, help="Requested capture height.")
     parser.add_argument("--cam-fps", type=float, default=30.0, help="Requested camera FPS.")
     parser.add_argument(
-        "--threshold",
+        "--red-h1-low",
         type=int,
-        default=100,
-        help="Binary threshold value used when --threshold-mode=fixed.",
+        default=0,
+        help="Lower hue bound for the first red HSV range [0..179].",
     )
     parser.add_argument(
-        "--threshold-mode",
-        type=str,
-        choices=["otsu", "adaptive", "fixed"],
-        default="otsu",
-        help="Threshold strategy (default: otsu).",
+        "--red-h1-high",
+        type=int,
+        default=12,
+        help="Upper hue bound for the first red HSV range [0..179].",
     )
     parser.add_argument(
-        "--adaptive-block-size",
+        "--red-h2-low",
         type=int,
-        default=31,
-        help="Adaptive threshold neighborhood size (odd integer).",
+        default=170,
+        help="Lower hue bound for the second red HSV range [0..179].",
     )
     parser.add_argument(
-        "--adaptive-c",
+        "--red-h2-high",
         type=int,
-        default=5,
-        help="Adaptive threshold subtraction constant.",
+        default=179,
+        help="Upper hue bound for the second red HSV range [0..179].",
+    )
+    parser.add_argument(
+        "--red-s-min",
+        type=int,
+        default=90,
+        help="Minimum saturation required for red pixels [0..255].",
+    )
+    parser.add_argument(
+        "--red-v-min",
+        type=int,
+        default=50,
+        help="Minimum value/brightness required for red pixels [0..255].",
+    )
+    parser.add_argument(
+        "--green-h-low",
+        type=int,
+        default=35,
+        help="Lower hue bound for green HSV range [0..179].",
+    )
+    parser.add_argument(
+        "--green-h-high",
+        type=int,
+        default=90,
+        help="Upper hue bound for green HSV range [0..179].",
+    )
+    parser.add_argument(
+        "--green-s-min",
+        type=int,
+        default=80,
+        help="Minimum saturation required for green pixels [0..255].",
+    )
+    parser.add_argument(
+        "--green-v-min",
+        type=int,
+        default=50,
+        help="Minimum value/brightness required for green pixels [0..255].",
+    )
+    parser.add_argument(
+        "--blue-h-low",
+        type=int,
+        default=90,
+        help="Lower hue bound for blue HSV range [0..179].",
+    )
+    parser.add_argument(
+        "--blue-h-high",
+        type=int,
+        default=130,
+        help="Upper hue bound for blue HSV range [0..179].",
+    )
+    parser.add_argument(
+        "--blue-s-min",
+        type=int,
+        default=80,
+        help="Minimum saturation required for blue pixels [0..255].",
+    )
+    parser.add_argument(
+        "--blue-v-min",
+        type=int,
+        default=50,
+        help="Minimum value/brightness required for blue pixels [0..255].",
     )
     parser.add_argument(
         "--min-area",
         type=float,
         default=120.0,
         help="Minimum contour area accepted inside a scan band.",
+    )
+    parser.add_argument(
+        "--green-min-area",
+        type=float,
+        default=85000.0,
+        help="Minimum contour area required to trigger the green D event.",
+    )
+    parser.add_argument(
+        "--blue-min-area",
+        type=float,
+        default=50000.0,
+        help="Minimum contour area required to trigger the blue B event.",
     )
     parser.add_argument(
         "--roi-bottom-ratio",
@@ -129,28 +196,22 @@ def parse_args():
         help="Arduino I2C slave address. Accepts decimal or hex, e.g. 0x08.",
     )
     parser.add_argument(
-        "--max-speed",
-        type=int,
-        default=255,
-        help="Maximum PWM value sent to each motor [0..255].",
-    )
-    parser.add_argument(
         "--command-rate-hz",
         type=float,
         default=20.0,
-        help="Minimum motor-speed send rate for keepalive.",
+        help="Minimum command send rate for keepalive.",
     )
     parser.add_argument(
-        "--green-min-area",
-        type=float,
-        default=500.0,
-        help="Minimum green contour area required to send D.",
+        "--max-speed",
+        type=int,
+        default=255,
+        help="Maximum drive speed sent with forward/left/right commands [0..255].",
     )
     parser.add_argument(
-        "--blue-min-area",
-        type=float,
-        default=500.0,
-        help="Minimum blue contour area required to send B.",
+        "--min-turn-speed",
+        type=int,
+        default=110,
+        help="Minimum turn speed sent while steering left/right [0..255].",
     )
     parser.add_argument(
         "--show-window",
@@ -190,63 +251,151 @@ def clamp_speed(value):
     return max(0, min(255, int(round(value))))
 
 
-def motor_speeds_from_centroid(cx, frame_w, left_bound, right_bound, max_speed):
-    full = clamp_speed(max_speed)
+def drive_message_from_centroid(cx, frame_w, left_bound, right_bound, args):
     if cx is None:
-        return 0, 0, "STOP"
+        return "stop 0"
 
+    full_speed = clamp_speed(args.max_speed)
     if cx <= left_bound:
-        if left_bound <= 0:
-            return 0, full, "TURN LEFT"
-        left_ratio = np.clip(float(cx) / float(left_bound), 0.0, 1.0)
-        return clamp_speed(full * left_ratio), full, "TURN LEFT"
+        turn_span = max(1, left_bound)
+        turn_ratio = min(1.0, (left_bound - cx) / float(turn_span))
+        speed = args.min_turn_speed + turn_ratio * (full_speed - args.min_turn_speed)
+        return "left {}".format(clamp_speed(speed))
 
     if cx >= right_bound:
-        right_edge = max(0.0, float(frame_w - 1))
-        right_span = max(1.0, right_edge - float(right_bound))
-        right_ratio = np.clip((right_edge - float(cx)) / right_span, 0.0, 1.0)
-        return full, clamp_speed(full * right_ratio), "TURN RIGHT"
+        turn_span = max(1, frame_w - right_bound)
+        turn_ratio = min(1.0, (cx - right_bound) / float(turn_span))
+        speed = args.min_turn_speed + turn_ratio * (full_speed - args.min_turn_speed)
+        return "right {}".format(clamp_speed(speed))
 
-    return full, full, "FORWARD"
+    return "forward {}".format(full_speed)
 
 
-def write_message(bus, addr, message):
-    payload = message.encode("ascii")
-    if not payload:
-        raise ValueError("Cannot send an empty I2C message.")
+def motor_state_from_message(message):
+    if message == "D":
+        return 0, 0, "GREEN DETECTED"
+    if message == "B":
+        return 0, 0, "BLUE DETECTED"
+
+    parts = message.split()
+    if not parts:
+        return 0, 0, "STOP"
+
+    action = parts[0].lower()
+    try:
+        speed = clamp_speed(int(parts[1])) if len(parts) > 1 else 0
+    except ValueError:
+        speed = 0
+    if action == "forward":
+        return speed, speed, "FORWARD"
+    if action == "left":
+        return 0, speed, "TURN LEFT"
+    if action == "right":
+        return speed, 0, "TURN RIGHT"
+    if action == "press":
+        return 0, 0, "PRESS"
+    return 0, 0, "STOP"
+
+
+def write_cmd(bus, addr, cmd):
+    payload = cmd.encode("ascii")
     bus.i2c_rdwr(i2c_msg.write(addr, payload))
 
 
-def send_motor_speeds(bus, addr, left_speed, right_speed):
-    write_message(bus, addr, "left {}".format(clamp_speed(left_speed)))
-    write_message(bus, addr, "right {}".format(clamp_speed(right_speed)))
+def image_hsv(image_bgr):
+    blurred = cv2.GaussianBlur(image_bgr, (5, 5), 0)
+    return cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
 
 
-def send_stop(bus, addr):
-    send_motor_speeds(bus, addr, 0, 0)
+def dual_hue_mask(hsv, h1_low, h1_high, h2_low, h2_high, s_min, v_min):
+    lower_1 = np.array([h1_low, s_min, v_min], dtype=np.uint8)
+    upper_1 = np.array([h1_high, 255, 255], dtype=np.uint8)
+    lower_2 = np.array([h2_low, s_min, v_min], dtype=np.uint8)
+    upper_2 = np.array([h2_high, 255, 255], dtype=np.uint8)
+
+    mask_1 = cv2.inRange(hsv, lower_1, upper_1)
+    mask_2 = cv2.inRange(hsv, lower_2, upper_2)
+    return cv2.bitwise_or(mask_1, mask_2)
 
 
-def threshold_mask(gray_blur, mode, fixed_thresh, adaptive_block_size, adaptive_c):
-    if mode == "fixed":
-        _, thresh = cv2.threshold(gray_blur, fixed_thresh, 255, cv2.THRESH_BINARY_INV)
-        return thresh
-    if mode == "adaptive":
-        block_size = max(3, int(adaptive_block_size))
-        if block_size % 2 == 0:
-            block_size += 1
-        return cv2.adaptiveThreshold(
-            gray_blur,
-            255,
-            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV,
-            block_size,
-            adaptive_c,
-        )
+def single_hue_mask(hsv, h_low, h_high, s_min, v_min):
+    lower = np.array([h_low, s_min, v_min], dtype=np.uint8)
+    upper = np.array([h_high, 255, 255], dtype=np.uint8)
+    return cv2.inRange(hsv, lower, upper)
 
-    _, thresh = cv2.threshold(
-        gray_blur, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+
+def red_mask(hsv, args):
+    return dual_hue_mask(
+        hsv,
+        args.red_h1_low,
+        args.red_h1_high,
+        args.red_h2_low,
+        args.red_h2_high,
+        args.red_s_min,
+        args.red_v_min,
     )
-    return thresh
+
+
+def green_mask(hsv, args):
+    return single_hue_mask(
+        hsv, args.green_h_low, args.green_h_high, args.green_s_min, args.green_v_min
+    )
+
+
+def blue_mask(hsv, args):
+    return single_hue_mask(
+        hsv, args.blue_h_low, args.blue_h_high, args.blue_s_min, args.blue_v_min
+    )
+
+
+def largest_contour_area(mask):
+    contours, _ = unpack_contours(
+        cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    )
+    if not contours:
+        return 0.0
+    return max(float(cv2.contourArea(contour)) for contour in contours)
+
+
+def event_message_from_areas(green_area, blue_area, green_min_area, blue_min_area):
+    if green_area >= green_min_area and green_area >= blue_area:
+        return "D"
+    if blue_area >= blue_min_area:
+        return "B"
+    return None
+
+
+def normalize_test_message(raw, args):
+    text = raw.strip()
+    if not text:
+        return ""
+
+    upper = text.upper()
+    if upper == "F":
+        return "forward {}".format(clamp_speed(args.max_speed))
+    if upper == "L":
+        return "left {}".format(clamp_speed(args.max_speed))
+    if upper == "R":
+        return "right {}".format(clamp_speed(args.max_speed))
+    if upper == "S":
+        return "stop 0"
+    if upper == "P":
+        return "press 0"
+    if upper in ("D", "B"):
+        return upper
+
+    parts = text.lower().split()
+    if len(parts) == 1 and parts[0] in ("stop", "press"):
+        return "{} 0".format(parts[0])
+    if len(parts) == 2 and parts[0] in ("forward", "left", "right", "stop", "press"):
+        try:
+            speed = clamp_speed(int(parts[1]))
+        except ValueError:
+            return ""
+        if parts[0] in ("stop", "press"):
+            speed = 0
+        return "{} {}".format(parts[0], speed)
+    return ""
 
 
 def find_band_center(mask, y0, y1, min_area):
@@ -282,36 +431,15 @@ def update_ema(prev, measurement, alpha):
     return alpha * prev + (1.0 - alpha) * float(measurement)
 
 
-def detect_color(image, lower_hsv, upper_hsv, min_area):
-    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    color_mask = cv2.inRange(hsv, lower_hsv, upper_hsv)
-    color_mask = cv2.erode(color_mask, GREEN_MORPH_KERNEL, iterations=1)
-    color_mask = cv2.dilate(color_mask, GREEN_MORPH_KERNEL, iterations=2)
-    contours, _ = unpack_contours(
-        cv2.findContours(color_mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    )
-    if not contours:
-        return False, 0.0
-
-    largest_area = max(float(cv2.contourArea(contour)) for contour in contours)
-    return largest_area >= min_area, largest_area
-
-
-def detect_green(image, min_area):
-    return detect_color(image, GREEN_LOWER_HSV, GREEN_UPPER_HSV, min_area)
-
-
-def detect_blue(image, min_area):
-    return detect_color(image, BLUE_LOWER_HSV, BLUE_UPPER_HSV, min_area)
-
-
 def run_test_mode(args):
     bus = None
     try:
         bus = SMBus(args.i2c_bus)
         time.sleep(0.1)
-        send_stop(bus, args.i2c_address)
-        print("Test mode: type messages like 'left 255', 'right 128', 'D', or 'B'. Type Q to quit.")
+        write_cmd(bus, args.i2c_address, "stop 0")
+        print(
+            "Test mode: type forward/left/right <0-255>, stop, press, D, B, or Q to quit."
+        )
 
         while True:
             try:
@@ -320,18 +448,23 @@ def run_test_mode(args):
                 print()
                 break
 
-            message = raw.strip()
-            if not message:
+            if not raw.strip():
                 continue
-            if message.upper() in ("Q", "QUIT", "EXIT"):
+            if raw.strip().upper() in ("Q", "QUIT", "EXIT"):
                 break
 
-            write_message(bus, args.i2c_address, message)
-            print("Sent {}".format(message))
+            cmd = normalize_test_message(raw, args)
+            if not cmd:
+                print("Invalid command. Use forward/left/right <0-255>, stop, press, D, B, or Q.")
+                continue
+
+            write_cmd(bus, args.i2c_address, cmd)
+            _, _, state_label = motor_state_from_message(cmd)
+            print("Sent {} ({})".format(cmd, state_label))
     finally:
         try:
             if bus is not None:
-                send_stop(bus, args.i2c_address)
+                write_cmd(bus, args.i2c_address, "stop 0")
         except Exception:
             pass
         if bus is not None:
@@ -343,8 +476,38 @@ def main():
 
     if not (0x03 <= args.i2c_address <= 0x77):
         raise ValueError("--i2c-address must be in the valid 7-bit range 0x03-0x77.")
-    if not (0 <= args.max_speed <= 255):
-        raise ValueError("--max-speed must be in [0, 255].")
+    for name in (
+        "red_h1_low",
+        "red_h1_high",
+        "red_h2_low",
+        "red_h2_high",
+        "green_h_low",
+        "green_h_high",
+        "blue_h_low",
+        "blue_h_high",
+    ):
+        value = getattr(args, name)
+        if not (0 <= value <= 179):
+            raise ValueError("--{} must be in [0, 179].".format(name.replace("_", "-")))
+    for name in (
+        "red_s_min",
+        "red_v_min",
+        "green_s_min",
+        "green_v_min",
+        "blue_s_min",
+        "blue_v_min",
+    ):
+        value = getattr(args, name)
+        if not (0 <= value <= 255):
+            raise ValueError("--{} must be in [0, 255].".format(name.replace("_", "-")))
+    if args.red_h1_low > args.red_h1_high:
+        raise ValueError("--red-h1-low must be <= --red-h1-high.")
+    if args.red_h2_low > args.red_h2_high:
+        raise ValueError("--red-h2-low must be <= --red-h2-high.")
+    if args.green_h_low > args.green_h_high:
+        raise ValueError("--green-h-low must be <= --green-h-high.")
+    if args.blue_h_low > args.blue_h_high:
+        raise ValueError("--blue-h-low must be <= --blue-h-high.")
 
     if args.mode == "test":
         run_test_mode(args)
@@ -354,6 +517,10 @@ def main():
         raise ValueError("--roi-bottom-ratio must be in (0, 1].")
     if args.min_area < 0.0:
         raise ValueError("--min-area must be >= 0.")
+    if args.green_min_area < 0.0:
+        raise ValueError("--green-min-area must be >= 0.")
+    if args.blue_min_area < 0.0:
+        raise ValueError("--blue-min-area must be >= 0.")
     if args.near_band_frac <= 0 or args.lookahead_band_frac <= 0:
         raise ValueError("--near-band-frac and --lookahead-band-frac must be > 0.")
     if args.lookahead_offset_frac <= 0 or args.lookahead_offset_frac >= 1:
@@ -366,6 +533,10 @@ def main():
         raise ValueError("--left-frac and --right-frac must be in (0, 1).")
     if args.left_frac >= args.right_frac:
         raise ValueError("--left-frac must be less than --right-frac.")
+    if not (0 <= args.max_speed <= 255):
+        raise ValueError("--max-speed must be in [0, 255].")
+    if not (0 <= args.min_turn_speed <= args.max_speed):
+        raise ValueError("--min-turn-speed must be in [0, --max-speed].")
     cap = open_camera(args.camera_index, args.width, args.height, args.cam_fps)
     if not cap.isOpened():
         raise RuntimeError(
@@ -387,19 +558,16 @@ def main():
 
     kernel = np.ones((3, 3), dtype=np.uint8)
     min_interval = 1.0 / max(1.0, args.command_rate_hz)
-    last_sent_left = None
-    last_sent_right = None
+    last_sent_cmd = None
     last_send_time = 0.0
     near_cx_ema = None
     look_cx_ema = None
     miss_streak = 0
-    green_detected_prev = False
-    blue_detected_prev = False
 
     try:
         bus = SMBus(args.i2c_bus)
         time.sleep(0.1)
-        send_stop(bus, args.i2c_address)
+        write_cmd(bus, args.i2c_address, "stop 0")
 
         while True:
             ok, image = cap.read()
@@ -425,17 +593,18 @@ def main():
                 look_y1 = near_y0
                 look_y0 = max(search_y0, look_y1 - look_band_h)
 
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            blur = cv2.GaussianBlur(gray, (5, 5), 0)
-            thresh = threshold_mask(
-                blur,
-                args.threshold_mode,
-                args.threshold,
-                args.adaptive_block_size,
-                args.adaptive_c,
-            )
-            mask = cv2.erode(thresh, kernel, iterations=2)
+            hsv = image_hsv(image)
+            mask = red_mask(hsv, args)
+            mask = cv2.erode(mask, kernel, iterations=2)
             mask = cv2.dilate(mask, kernel, iterations=2)
+            green = green_mask(hsv, args)
+            green = cv2.erode(green, kernel, iterations=1)
+            green = cv2.dilate(green, kernel, iterations=1)
+            blue = blue_mask(hsv, args)
+            blue = cv2.erode(blue, kernel, iterations=1)
+            blue = cv2.dilate(blue, kernel, iterations=1)
+            green_area = largest_contour_area(green)
+            blue_area = largest_contour_area(blue)
 
             near_cx, near_cy, near_area = find_band_center(
                 mask, near_y0, near_y1, args.min_area
@@ -446,6 +615,7 @@ def main():
 
             near_cx_ema = update_ema(near_cx_ema, near_cx, args.ema_alpha)
             look_cx_ema = update_ema(look_cx_ema, look_cx, args.ema_alpha)
+            cmd = "stop 0"
             fused_cx = None
             near_for_fuse = near_cx_ema if near_cx is not None else None
             look_for_fuse = look_cx_ema if look_cx is not None else None
@@ -469,52 +639,30 @@ def main():
             elif look_for_fuse is not None:
                 fused_cx = int(round(look_for_fuse))
 
-            left_speed, right_speed, state_label = motor_speeds_from_centroid(
-                fused_cx, frame_w, left_bound, right_bound, args.max_speed
+            event_cmd = event_message_from_areas(
+                green_area, blue_area, args.green_min_area, args.blue_min_area
             )
-            green_detected, green_area = detect_green(image, args.green_min_area)
-            blue_detected, blue_area = detect_blue(image, args.blue_min_area)
+            if event_cmd is not None:
+                cmd = event_cmd
+            else:
+                cmd = drive_message_from_centroid(
+                    fused_cx, frame_w, left_bound, right_bound, args
+                )
 
             now = time.monotonic()
-            if (
-                left_speed != last_sent_left
-                or right_speed != last_sent_right
-                or (now - last_send_time) >= min_interval
-            ):
+            if cmd != last_sent_cmd or (now - last_send_time) >= min_interval:
                 try:
-                    send_motor_speeds(bus, args.i2c_address, left_speed, right_speed)
+                    write_cmd(bus, args.i2c_address, cmd)
                 except OSError as exc:
                     raise RuntimeError(
                         "I2C write failed on bus {} to address {}.".format(
                             args.i2c_bus, hex(args.i2c_address)
                         )
                     ) from exc
-                last_sent_left = left_speed
-                last_sent_right = right_speed
+                last_sent_cmd = cmd
                 last_send_time = now
 
-            if green_detected and not green_detected_prev:
-                try:
-                    write_message(bus, args.i2c_address, "D")
-                except OSError as exc:
-                    raise RuntimeError(
-                        "I2C write failed on bus {} to address {}.".format(
-                            args.i2c_bus, hex(args.i2c_address)
-                        )
-                    ) from exc
-            green_detected_prev = green_detected
-
-            if blue_detected and not blue_detected_prev:
-                try:
-                    write_message(bus, args.i2c_address, "B")
-                except OSError as exc:
-                    raise RuntimeError(
-                        "I2C write failed on bus {} to address {}.".format(
-                            args.i2c_bus, hex(args.i2c_address)
-                        )
-                    ) from exc
-            blue_detected_prev = blue_detected
-
+            left_speed, right_speed, state_label = motor_state_from_message(cmd)
             left_pct = int(round((left_speed / 255.0) * 100))
             right_pct = int(round((right_speed / 255.0) * 100))
 
@@ -545,7 +693,7 @@ def main():
                     )
                 cv2.putText(
                     image,
-                    "STATE: {}".format(state_label),
+                    "TX: {} ({})".format(cmd, state_label),
                     (8, 24),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.6,
@@ -567,13 +715,11 @@ def main():
                 )
                 cv2.putText(
                     image,
-                    "near_x={} area={:.0f}  look_x={} area={:.0f}  green={:.0f}  blue={:.0f}".format(
+                    "near_x={} area={:.0f}  look_x={} area={:.0f}  mask=red".format(
                         "-" if near_cx is None else near_cx,
                         near_area,
                         "-" if look_cx is None else look_cx,
                         look_area,
-                        green_area,
-                        blue_area,
                     ),
                     (8, 80),
                     cv2.FONT_HERSHEY_SIMPLEX,
@@ -584,15 +730,16 @@ def main():
                 )
                 cv2.putText(
                     image,
-                    "mode={}  D={}  B={}".format(
-                        args.threshold_mode,
-                        "YES" if green_detected else "NO",
-                        "YES" if blue_detected else "NO",
+                    "green_area={:.0f}/{:.0f}  blue_area={:.0f}/{:.0f}".format(
+                        green_area,
+                        args.green_min_area,
+                        blue_area,
+                        args.blue_min_area,
                     ),
-                    (8, 104),
+                    (8, 108),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.55,
-                    (0, 220, 120) if (green_detected or blue_detected) else (220, 220, 220),
+                    (180, 255, 180),
                     1,
                     cv2.LINE_AA,
                 )
@@ -600,16 +747,16 @@ def main():
 
                 # If user closes the window (X button), stop robot and exit.
                 if cv2.getWindowProperty("img", cv2.WND_PROP_VISIBLE) < 1:
-                    send_stop(bus, args.i2c_address)
+                    write_cmd(bus, args.i2c_address, "stop 0")
                     break
 
                 if (cv2.waitKey(1) & 0xFF) == ord("q"):
-                    send_stop(bus, args.i2c_address)
+                    write_cmd(bus, args.i2c_address, "stop 0")
                     break
     finally:
         try:
             if bus is not None:
-                send_stop(bus, args.i2c_address)
+                write_cmd(bus, args.i2c_address, "stop 0")
         except Exception:
             pass
         if bus is not None:
