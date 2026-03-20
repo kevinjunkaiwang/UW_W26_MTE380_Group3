@@ -210,7 +210,7 @@ def parse_args():
     parser.add_argument(
         "--min-turn-speed",
         type=int,
-        default=110,
+        default=255,
         help="Minimum turn speed attached to L/R commands [0..255].",
     )
     parser.add_argument(
@@ -299,6 +299,8 @@ def motor_state_from_command(cmd):
 def write_cmd(bus, addr, cmd):
     payload = cmd.encode("ascii")
     bus.i2c_rdwr(i2c_msg.write(addr, payload))
+    timestamp = time.strftime("%H:%M:%S")
+    print("[{}] TX {} {}".format(timestamp, hex(addr), cmd), flush=True)
 
 
 def image_hsv(image_bgr):
@@ -472,8 +474,6 @@ def run_test_mode(args):
                 continue
 
             write_cmd(bus, args.i2c_address, cmd)
-            _, _, state_label = motor_state_from_command(cmd)
-            print("Sent {} ({})".format(cmd, state_label))
     finally:
         try:
             if bus is not None:
