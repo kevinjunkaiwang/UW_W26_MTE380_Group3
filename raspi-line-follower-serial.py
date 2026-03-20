@@ -4,9 +4,9 @@ Raspberry Pi line-following vision node that sends driving commands to Arduino.
 Command protocol (ASCII messages over I2C):
   F <0..255> -> forward
   L <0..255> -> turn left
-  P 0 -> press
+  P -> press
   R <0..255> -> turn right
-  S 0 -> stop
+  S -> stop
   D -> green detected
   U -> blue detected
 """
@@ -253,7 +253,7 @@ def clamp_speed(value):
 
 def command_from_centroid(cx, frame_w, left_bound, right_bound, args):
     if cx is None:
-        return "S 0"
+        return "S"
     if cx <= left_bound:
         turn_span = max(1, left_bound)
         turn_ratio = min(1.0, (left_bound - cx) / float(turn_span))
@@ -375,9 +375,9 @@ def normalize_test_message(raw, args):
     if upper == "R":
         return "R {}".format(clamp_speed(args.max_speed))
     if upper == "S":
-        return "S 0"
+        return "S"
     if upper == "P":
-        return "P 0"
+        return "P"
     if upper in ("D", "U"):
         return upper
 
@@ -388,7 +388,7 @@ def normalize_test_message(raw, args):
         except ValueError:
             return ""
         if parts[0].upper() in ("S", "P"):
-            speed = 0
+            return parts[0].upper()
         return "{} {}".format(parts[0].upper(), speed)
 
     lowered = text.lower()
@@ -396,8 +396,8 @@ def normalize_test_message(raw, args):
         "forward": "F {}".format(clamp_speed(args.max_speed)),
         "left": "L {}".format(clamp_speed(args.max_speed)),
         "right": "R {}".format(clamp_speed(args.max_speed)),
-        "stop": "S 0",
-        "press": "P 0",
+        "stop": "S",
+        "press": "P",
         "green": "D",
         "blue": "U",
     }
@@ -444,7 +444,7 @@ def run_test_mode(args):
     try:
         bus = SMBus(args.i2c_bus)
         time.sleep(0.1)
-        write_cmd(bus, args.i2c_address, "S 0")
+        write_cmd(bus, args.i2c_address, "S")
         print(
             "Test mode: type F/L/R <0-255>, S, P, D, U, or forward/left/right/stop/press/green/blue. Q quits."
         )
@@ -474,7 +474,7 @@ def run_test_mode(args):
     finally:
         try:
             if bus is not None:
-                write_cmd(bus, args.i2c_address, "S 0")
+                write_cmd(bus, args.i2c_address, "S")
         except Exception:
             pass
         if bus is not None:
@@ -577,7 +577,7 @@ def main():
     try:
         bus = SMBus(args.i2c_bus)
         time.sleep(0.1)
-        write_cmd(bus, args.i2c_address, "S 0")
+        write_cmd(bus, args.i2c_address, "S")
 
         while True:
             ok, image = cap.read()
@@ -625,7 +625,7 @@ def main():
 
             near_cx_ema = update_ema(near_cx_ema, near_cx, args.ema_alpha)
             look_cx_ema = update_ema(look_cx_ema, look_cx, args.ema_alpha)
-            cmd = "S 0"
+            cmd = "S"
             fused_cx = None
             near_for_fuse = near_cx_ema if near_cx is not None else None
             look_for_fuse = look_cx_ema if look_cx is not None else None
@@ -755,16 +755,16 @@ def main():
 
                 # If user closes the window (X button), stop robot and exit.
                 if cv2.getWindowProperty("img", cv2.WND_PROP_VISIBLE) < 1:
-                    write_cmd(bus, args.i2c_address, "S 0")
+                    write_cmd(bus, args.i2c_address, "S")
                     break
 
                 if (cv2.waitKey(1) & 0xFF) == ord("q"):
-                    write_cmd(bus, args.i2c_address, "S 0")
+                    write_cmd(bus, args.i2c_address, "S")
                     break
     finally:
         try:
             if bus is not None:
-                write_cmd(bus, args.i2c_address, "S 0")
+                write_cmd(bus, args.i2c_address, "S")
         except Exception:
             pass
         if bus is not None:
