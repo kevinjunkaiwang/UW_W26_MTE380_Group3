@@ -272,6 +272,8 @@ def motor_state_from_command(cmd):
         return 0, 0, "GREEN DETECTED"
     if cmd == "U":
         return 0, 0, "BLUE DETECTED"
+    if cmd == "B":
+        return 0, 0, "BACKWARD"
 
     parts = cmd.split()
     if not parts:
@@ -378,7 +380,7 @@ def normalize_test_message(raw, args):
         return "S"
     if upper == "P":
         return "P"
-    if upper in ("D", "U"):
+    if upper in ("D", "U", "B"):
         return upper
 
     parts = text.split()
@@ -400,6 +402,7 @@ def normalize_test_message(raw, args):
         "press": "P",
         "green": "D",
         "blue": "U",
+        "backward": "B",
     }
     if lowered in aliases:
         return aliases[lowered]
@@ -446,7 +449,7 @@ def run_test_mode(args):
         time.sleep(0.1)
         write_cmd(bus, args.i2c_address, "S")
         print(
-            "Test mode: type F/L/R <0-255>, S, P, D, U, or forward/left/right/stop/press/green/blue. Q quits."
+            "Test mode: type F/L/R <0-255>, B, S, P, D, U, or forward/left/right/backward/stop/press/green/blue. Q quits."
         )
 
         while True:
@@ -464,7 +467,7 @@ def run_test_mode(args):
             cmd = normalize_test_message(raw, args)
             if not cmd:
                 print(
-                    "Invalid command. Use F/L/R <0-255>, S, P, D, U or forward/left/right/stop/press/green/blue."
+                    "Invalid command. Use F/L/R <0-255>, B, S, P, D, U or forward/left/right/backward/stop/press/green/blue."
                 )
                 continue
 
