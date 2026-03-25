@@ -133,7 +133,7 @@ def parse_args():
         "--blue-min-area",
         type=float,
         default=20000.0,
-        help="Minimum contour area required to trigger the blue B event.",
+        help="Minimum contour area required to trigger the blue forward event (F 100).",
     )
     parser.add_argument(
         "--roi-bottom-ratio",
@@ -362,7 +362,7 @@ def event_message_from_areas(green_area, blue_area, green_min_area, blue_min_are
     if green_area >= green_min_area and green_area >= blue_area:
         return "D"
     if blue_area >= blue_min_area:
-        return "U"
+        return "F 100"
     return None
 
 
@@ -576,6 +576,7 @@ def main():
     near_cx_ema = None
     look_cx_ema = None
     miss_streak = 0
+    camera_read_failures = 0
 
     try:
         bus = SMBus(args.i2c_bus)
@@ -585,7 +586,38 @@ def main():
         while True:
             ok, image = cap.read()
             if not ok or image is None:
+                camera_read_failures += 1
+                near_cx_ema = None
+                look_cx_ema = None
+                miss_streak = 0
+
+                now = time.monotonic()
+                if last_sent_cmd != "S" or (now - last_send_time) >= min_interval:
+                    try:
+                        write_cmd(bus, args.i2c_address, "S")
+                    except OSError as exc:
+                        raise RuntimeError(
+                            "I2C write failed while sending stop after camera read failure."
+                        ) from exc
+                    last_sent_cmd = "S"
+                    last_send_time = now
+
+                if camera_read_failures == 1:
+                    print("Camera read failed; sent stop command.", flush=True)
+                time.sleep(0.05)
+                if camera_read_failures >= 10:
+                    raise RuntimeError(
+                        "Camera read failed 10 consecutive times; stop command sent and exiting."
+                    )
                 continue
+            if camera_read_failures > 0:
+                print(
+                    "Camera read recovered after {} consecutive failure(s).".format(
+                        camera_read_failures
+                    ),
+                    flush=True,
+                )
+                camera_read_failures = 0
 
             frame_h, frame_w = image.shape[:2]
             left_bound = int(args.left_frac * frame_w)
