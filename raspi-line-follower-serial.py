@@ -1,7 +1,7 @@
 """
 Raspberry Pi line-following vision node that sends driving commands to Arduino.
 
-Command protocol (ASCII messages over I2C):
+Command protocol (ASCII messages over serial, newline-terminated):
   F <0..255> -> forward
   L <0..255> -> turn left
   P -> press
@@ -16,12 +16,18 @@ import time
 
 import cv2
 import numpy as np
-from smbus2 import SMBus, i2c_msg
+import serial
+
+from serial_communication import SerialCommunication
+
+
+def default_port():
+    return "/dev/ttyACM0"
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Line-follow camera pipeline with I2C commands to Arduino."
+        description="Line-follow camera pipeline with serial commands to Arduino."
     )
     parser.add_argument(
         "mode",
@@ -133,7 +139,7 @@ def parse_args():
         "--blue-min-area",
         type=float,
         default=20000.0,
-        help="Minimum contour area required to trigger the blue forward event (F 100).",
+        help="Minimum contour area required to trigger the blue U event.",
     )
     parser.add_argument(
         "--roi-bottom-ratio",
@@ -184,16 +190,28 @@ def parse_args():
         help="Right turn threshold as frame-width fraction.",
     )
     parser.add_argument(
-        "--i2c-bus",
-        type=int,
-        default=1,
-        help="Linux I2C bus number, e.g. SMBus(1) for /dev/i2c-1.",
+        "--port",
+        type=str,
+        default=default_port(),
+        help="Serial port to Arduino, e.g. /dev/ttyACM0.",
     )
     parser.add_argument(
-        "--i2c-address",
-        type=lambda value: int(value, 0),
-        default=0x08,
-        help="Arduino I2C slave address. Accepts decimal or hex, e.g. 0x08.",
+        "--baud",
+        type=int,
+        default=115200,
+        help="Serial baud rate.",
+    )
+    parser.add_argument(
+        "--serial-timeout",
+        type=float,
+        default=0.0,
+        help="PySerial read timeout in seconds.",
+    )
+    parser.add_argument(
+        "--serial-ready-delay",
+        type=float,
+        default=2.0,
+        help="Delay after opening serial to allow Arduino auto-reset.",
     )
     parser.add_argument(
         "--command-rate-hz",
@@ -296,11 +314,50 @@ def motor_state_from_command(cmd):
     return 0, 0, "STOP"
 
 
-def write_cmd(bus, addr, cmd):
-    payload = cmd.encode("ascii")
-    bus.i2c_rdwr(i2c_msg.write(addr, payload))
+def open_serial_link(port, baud, timeout, ready_delay):
+    return SerialCommunication(
+        port=port,
+        baud=baud,
+        timeout=timeout,
+        ready_delay=ready_delay,
+    )
+
+
+def send_command(link, cmd):
+    parts = cmd.split()
+    if not parts:
+        return
+
+    action = parts[0].upper()
+    speed = None
+    if len(parts) > 1:
+        try:
+            speed = clamp_speed(int(parts[1]))
+        except ValueError:
+            speed = None
+
+    if action == "F":
+        link.forward(speed)
+    elif action == "B":
+        link.backward(speed)
+    elif action == "L":
+        link.left(speed)
+    elif action == "R":
+        link.right(speed)
+    elif action == "S":
+        link.stop()
+    elif action == "P":
+        link.detect_and_press()
+    elif action == "U":
+        link.blue_detected()
+    else:
+        link.send_raw(cmd)
+
+
+def write_cmd(link, cmd):
+    send_command(link, cmd)
     timestamp = time.strftime("%H:%M:%S")
-    print("[{}] TX {} {}".format(timestamp, hex(addr), cmd), flush=True)
+    print("[{}] TX {} {}".format(timestamp, link.port, cmd), flush=True)
 
 
 def image_hsv(image_bgr):
@@ -362,7 +419,7 @@ def event_message_from_areas(green_area, blue_area, green_min_area, blue_min_are
     if green_area >= green_min_area and green_area >= blue_area:
         return "D"
     if blue_area >= blue_min_area:
-        return "F 100"
+        return "U"
     return None
 
 
@@ -386,7 +443,7 @@ def normalize_test_message(raw, args):
         return upper
 
     parts = text.split()
-    if len(parts) == 2 and parts[0].upper() in ("F", "L", "R", "S", "P"):
+    if len(parts) == 2 and parts[0].upper() in ("F", "B", "L", "R", "S", "P"):
         try:
             speed = clamp_speed(int(parts[1]))
         except ValueError:
@@ -445,11 +502,15 @@ def update_ema(prev, measurement, alpha):
 
 
 def run_test_mode(args):
-    bus = None
+    link = None
     try:
-        bus = SMBus(args.i2c_bus)
-        time.sleep(0.1)
-        write_cmd(bus, args.i2c_address, "S")
+        link = open_serial_link(
+            args.port,
+            args.baud,
+            args.serial_timeout,
+            args.serial_ready_delay,
+        )
+        write_cmd(link, "S")
         print(
             "Test mode: type F/L/R <0-255>, B, S, P, D, U, or forward/left/right/backward/stop/press/green/blue. Q quits."
         )
@@ -473,22 +534,28 @@ def run_test_mode(args):
                 )
                 continue
 
-            write_cmd(bus, args.i2c_address, cmd)
+            write_cmd(link, cmd)
     finally:
         try:
-            if bus is not None:
-                write_cmd(bus, args.i2c_address, "S")
+            if link is not None:
+                write_cmd(link, "S")
         except Exception:
             pass
-        if bus is not None:
-            bus.close()
+        if link is not None:
+            link.disconnect()
 
 
 def main():
     args = parse_args()
 
-    if not (0x03 <= args.i2c_address <= 0x77):
-        raise ValueError("--i2c-address must be in the valid 7-bit range 0x03-0x77.")
+    if not args.port:
+        raise ValueError("--port must not be empty.")
+    if args.baud <= 0:
+        raise ValueError("--baud must be > 0.")
+    if args.serial_timeout < 0.0:
+        raise ValueError("--serial-timeout must be >= 0.")
+    if args.serial_ready_delay < 0.0:
+        raise ValueError("--serial-ready-delay must be >= 0.")
     for name in (
         "red_h1_low",
         "red_h1_high",
@@ -550,6 +617,7 @@ def main():
         raise ValueError("--max-speed must be in [0, 255].")
     if not (0 <= args.min_turn_speed <= args.max_speed):
         raise ValueError("--min-turn-speed must be in [0, --max-speed].")
+
     cap = open_camera(args.camera_index, args.width, args.height, args.cam_fps)
     if not cap.isOpened():
         raise RuntimeError(
@@ -558,7 +626,7 @@ def main():
             )
         )
 
-    bus = None
+    link = None
     if args.show_window:
         cv2.namedWindow("img", cv2.WINDOW_NORMAL)
         actual_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -579,9 +647,20 @@ def main():
     camera_read_failures = 0
 
     try:
-        bus = SMBus(args.i2c_bus)
-        time.sleep(0.1)
-        write_cmd(bus, args.i2c_address, "S")
+        try:
+            link = open_serial_link(
+                args.port,
+                args.baud,
+                args.serial_timeout,
+                args.serial_ready_delay,
+            )
+        except serial.SerialException as exc:
+            raise RuntimeError(
+                "Could not open serial port {} at {} baud.".format(
+                    args.port, args.baud
+                )
+            ) from exc
+        write_cmd(link, "S")
 
         while True:
             ok, image = cap.read()
@@ -594,10 +673,10 @@ def main():
                 now = time.monotonic()
                 if last_sent_cmd != "S" or (now - last_send_time) >= min_interval:
                     try:
-                        write_cmd(bus, args.i2c_address, "S")
-                    except OSError as exc:
+                        write_cmd(link, "S")
+                    except serial.SerialException as exc:
                         raise RuntimeError(
-                            "I2C write failed while sending stop after camera read failure."
+                            "Serial write failed while sending stop after camera read failure."
                         ) from exc
                     last_sent_cmd = "S"
                     last_send_time = now
@@ -695,11 +774,11 @@ def main():
             now = time.monotonic()
             if cmd != last_sent_cmd or (now - last_send_time) >= min_interval:
                 try:
-                    write_cmd(bus, args.i2c_address, cmd)
-                except OSError as exc:
+                    write_cmd(link, cmd)
+                except serial.SerialException as exc:
                     raise RuntimeError(
-                        "I2C write failed on bus {} to address {}.".format(
-                            args.i2c_bus, hex(args.i2c_address)
+                        "Serial write failed on port {} at {} baud.".format(
+                            args.port, args.baud
                         )
                     ) from exc
                 last_sent_cmd = cmd
@@ -790,20 +869,20 @@ def main():
 
                 # If user closes the window (X button), stop robot and exit.
                 if cv2.getWindowProperty("img", cv2.WND_PROP_VISIBLE) < 1:
-                    write_cmd(bus, args.i2c_address, "S")
+                    write_cmd(link, "S")
                     break
 
                 if (cv2.waitKey(1) & 0xFF) == ord("q"):
-                    write_cmd(bus, args.i2c_address, "S")
+                    write_cmd(link, "S")
                     break
     finally:
         try:
-            if bus is not None:
-                write_cmd(bus, args.i2c_address, "S")
+            if link is not None:
+                write_cmd(link, "S")
         except Exception:
             pass
-        if bus is not None:
-            bus.close()
+        if link is not None:
+            link.disconnect()
         cap.release()
         cv2.destroyAllWindows()
 
