@@ -98,35 +98,34 @@ class SerialCommunication:
     # ===============================
     def teleop(self):
         print("\nStarting Teleop Mode")
-        print("Controls:")
-        print("  w = forward")
-        print("  s = backward")
-        print("  a = left")
-        print("  d = right")
-        print("  space = stop")
-        print("  p = detect & press")
-        print("  r = release")
-        print("  +/- = change speed")
-        print("  q = quit\n")
+        print("w/s/a/d move | space stop | +/- speed | p press | r release | q quit\n")
 
         curses.wrapper(self._teleop_loop)
+
 
     def _teleop_loop(self, stdscr):
         stdscr.nodelay(True)
         stdscr.clear()
 
+        last_motion = None  # track current direction
+
         while True:
             key = stdscr.getch()
 
             if key == ord('w'):
+                last_motion = 'F'
                 self.forward()
             elif key == ord('s'):
+                last_motion = 'B'
                 self.backward()
             elif key == ord('a'):
+                last_motion = 'L'
                 self.left()
             elif key == ord('d'):
+                last_motion = 'R'
                 self.right()
             elif key == ord(' '):
+                last_motion = None
                 self.stop()
             elif key == ord('p'):
                 self.detect_and_press()
@@ -134,8 +133,13 @@ class SerialCommunication:
                 self.release()
             elif key == ord('+'):
                 self.current_speed = min(255, self.current_speed + 10)
+                # resend motion if currently moving
+                if last_motion:
+                    self.send_raw(f"{last_motion} {self.current_speed}")
             elif key == ord('-'):
                 self.current_speed = max(0, self.current_speed - 10)
+                if last_motion:
+                    self.send_raw(f"{last_motion} {self.current_speed}")
             elif key == ord('q'):
                 self.stop()
                 break
@@ -143,12 +147,13 @@ class SerialCommunication:
             stdscr.clear()
             stdscr.addstr(0, 0, "=== TELEOP MODE ===")
             stdscr.addstr(2, 0, f"Speed: {self.current_speed}")
-            stdscr.addstr(4, 0, "w/s/a/d to move")
-            stdscr.addstr(5, 0, "space to stop")
-            stdscr.addstr(6, 0, "p = detect & press")
-            stdscr.addstr(7, 0, "r = release")
+            stdscr.addstr(4, 0, f"Direction: {last_motion if last_motion else 'Stopped'}")
+            stdscr.addstr(6, 0, "w/s/a/d move")
+            stdscr.addstr(7, 0, "space stop")
             stdscr.addstr(8, 0, "+/- speed")
-            stdscr.addstr(9, 0, "q = quit")
+            stdscr.addstr(9, 0, "p press")
+            stdscr.addstr(10, 0, "r release")
+            stdscr.addstr(11, 0, "q quit")
 
             stdscr.refresh()
-            time.sleep(0.05)
+            time.sleep(0.05)`
